@@ -1,4 +1,4 @@
-# Biodiversity Assessment in Mangrove Forests in Kenya
+# Biodiversity assessment in mangrove forests in Kenya
 
 ## Overview
 
