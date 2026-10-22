@@ -1,0 +1,407 @@
+---
+title: "Mangrove biodiversity data analysis"
+format: html
+---
+
+```{r}
+pacman::p_load(phyloseq, biomformat, tidyverse,
+               rgbif, tidyr, worrms, microeco,
+               phyloseq, magrittr, aplot, metacoder)
+
+
+# Load the data
+df1 <- read.csv("data/taxa.csv",
+                stringsAsFactors = FALSE)
+df2 <- read.csv("data/taxar.csv",
+                stringsAsFactors = FALSE)
+
+# Check similarity (optional diagnostics)
+similar_columns <- intersect(names(df1),
+                             names(df2))
+different_columns <- setdiff(union(names(df1),
+                                   names(df2)),
+                             similar_columns)
+
+cat("Shared columns:",
+    paste(similar_columns, collapse = ", "), "\n")
+cat("Unique columns:",
+    paste(different_columns, collapse = ", "), "\n")
+
+# Merge files by a common identifier 
+merged_df <- merge(df1, df2, by = "name", all = TRUE)
+
+# Extract and sort column names from column 3 to 113
+sorted_cols <- sort(names(merged_df)[1:116])
+
+# Apply column selection and reordering
+df_eDNA <- merged_df |>
+  dplyr::select(1:2, all_of(sorted_cols),
+                everything()) |>
+  dplyr::select(-lineage.x, -taxRank.y,
+                -taxID.y,
+                -lineage.y, -Max.x, -Max.y,
+                -taxRank.x) |>
+  mutate(name = gsub("\\[|\\]", "", name)) |>
+  rename_with(~ str_remove(., "\\.cladeReads$"),
+              .cols = everything()) |>
+  relocate(taxID.x, .before = 2) |>
+  mutate(across(3:109, ~ replace(., is.na(.)|. < 4, 0))) |>
+  filter(if_any(.cols = 3:109, ~. !=0)) |>
+  rename(scientific_name = name,
+         otu = taxID.x) |>
+  select(scientific_name, otu, everything()) |>
+  drop_na(otu)
+```
+
+Loading the inventory of data collated from various online database and reviewed literature
+
+```{r}
+pacman::p_load(
+  janitor,    
+  lubridate,  
+  tidyverse
+  )
+
+# Filter out taxa which does not confom to binomial nomenclature
+pattern <-"^[A-Z][a-z]+\\s[A-Z]?[a-z]+$"
+
+# Load inventoried data sets
+gbif <- read_csv("inventory_data/gbif_.csv") |>
+  select(species) |>
+  drop_na() |>
+  unique() |>
+  rename("scienticname" = "species")
+
+obis <- read_csv("inventory_data/obis.csv") |>
+  select(scientificname) |>
+  unique()
+
+fishbase <- read_csv("inventory_data/fishbase.csv") |>
+  janitor::clean_names() |>
+  select(species) |>
+  unique() |>
+  rename("scientificname" = "species")
+
+worm <- read_csv("inventory_data/WoRMS.csv") |>
+  janitor::clean_names() |> 
+  select(scientific_name) |>
+  unique() |>
+  rename("scientificname" = "scientific_name")
+
+lit <- read_csv("inventory_data/litsurv.csv") |>
+  janitor::clean_names() |> 
+  select(taxon_name) |>
+  drop_na() |>
+  unique() |>
+  rgbif::name_backbone_checklist()
+
+lite <- lit |>
+  select(species) |>
+  drop_na() |> 
+  rename("scientificname" = "species")
+
+#List of data to merge
+inventory <- list(
+  gbif, obis, fishbase,
+  worm, lite
+)
+
+#Standardize column names for all data sets
+inventory <- lapply(inventory, function(df) {
+  colnames(df) <- "scientificname"
+  return(df)
+})
+
+#Merge all the data sets
+df_inventory <- do.call(rbind, inventory) |>
+  unique()
+
+#Filter and remove non-binomial nomenclature names
+df_inventory <- df_inventory |>
+  filter(grepl(pattern, scientificname))
+
+df_match <- df_eDNA |>
+  select(scientific_name)
+
+#Add a new column in A to store match results
+df_match$match_results <- ifelse(df_eDNA$scientific_name
+                                 %in% df_inventory$scientificname,
+                                 "Expected", "Unexpected")
+
+```
+
+Merge all the data sets, from the microbes, and biodiversity comparizon
+
+```{r}
+# Load the necessary packages
+pacman::p_load(worrms, purrr, dplyr)
+
+#Merge the match and the df_data
+df_eDNA <- full_join(df_eDNA, df_match,
+                     by = "scientific_name") 
+
+
+df_egbif <- name_backbone_checklist(
+  df_eDNA$scientific_name)
+
+df_egbif_clean <- df_egbif |>
+  select(kingdom, phylum, class,
+         order, family, genus, verbatim_name) |> 
+  rename(species = verbatim_name)
+
+
+df_na_class <- df_egbif |> 
+  filter(is.na(class))
+species_list <- df_egbif |>
+  distinct() |>
+  janitor::clean_names() |> 
+  select(verbatim_name) |>
+  pull() 
+
+
+# Break into chunks of 1000
+species_chunks <- split(species_list,
+                        ceiling(seq_along(species_list) / 1000))
+
+# Break into sub-chunks of 50 names
+match_worms_subchunk <- function(names_50) {
+  tryCatch({
+    Sys.sleep(5)
+    wm_records_names(names_50)
+  }, error = function(e) {
+    message("Error: ", conditionMessage(e))
+    return(NULL)
+  })
+}
+
+# Function to process one 1000-chunk
+process_chunk <- function(species_chunk) {
+  sub_chunks <- split(species_chunk,
+                      ceiling(seq_along(species_chunk) / 50))
+  map_dfr(sub_chunks, match_worms_subchunk)
+}
+
+# Process all 1000-chunks
+all_matches <- map_dfr(species_chunks,
+                       process_chunk)
+
+df_worms <- all_matches |> 
+  select(
+    kingdom, phylum, class, order,
+    family, genus, scientificname,
+    isMarine, isBrackish, isFreshwater,
+    isTerrestrial, isExtinct
+  ) |> 
+  rename(species = scientificname) |>
+  mutate(across(isMarine:isExtinct, ~replace_na(., 0))) |> 
+  mutate(
+    Habitat = case_when(
+      isMarine == 1 & isBrackish == 1 & isFreshwater == 1 & isTerrestrial == 1 ~ "Euryhaline",
+      isMarine == 1 & isBrackish == 1 & isFreshwater == 1 ~ "Euryhaline",
+      isMarine == 1 & isBrackish == 1 ~ "Euryhaline",
+      isMarine == 1 & isFreshwater == 1 & isTerrestrial == 1 ~ "Euryhaline",
+      isTerrestrial == 1 & isMarine != 1 & isBrackish != 1 ~ "Euryhaline",
+      isMarine == 1 & isBrackish != 1 & isFreshwater != 1 & isTerrestrial != 1 ~ "Marine",
+      isMarine != 1 & isBrackish == 1 & isFreshwater == 1 & isTerrestrial != 1 ~ "Euryhaline",
+      isMarine == 1 & isBrackish != 1 & isFreshwater != 1 & isTerrestrial == 1 ~ "Euryhaline",
+      isMarine != 1 & isBrackish == 1 & isFreshwater == 1 & isTerrestrial == 1 ~ "Brackish",
+      isMarine == 1 & isBrackish != 1 & isFreshwater == 1 & isTerrestrial != 1 ~ "Euryhaline",
+      isMarine != 1 & isBrackish == 1 & isFreshwater != 1 & isTerrestrial != 1 ~ "Brackish",
+      isMarine != 1 & isBrackish == 1 & isFreshwater != 1 & isTerrestrial == 1 ~ "Brackish",
+      TRUE ~ NA_character_
+    )
+  )
+
+df_feDNA <- df_egbif_clean |>
+  left_join(df_worms |>
+              select(species, class, Habitat),
+            by = "species", suffix = c(".clean", ".worms")) |> 
+  mutate(class = coalesce(class.clean, class.worms))  |> 
+  select(-class.clean, -class.worms) |>
+  rename(scientific_name = species)
+
+# Merge all the datasets 
+df_manuscript <- full_join(df_feDNA,
+                           df_eDNA,
+                           by = "scientific_name") |>
+  filter(otu != 0) |>
+  mutate(otu = paste0("otu_", otu)) |>
+  rename(status = match_results) |>
+  mutate(Habitat = if_else(kingdom =="Fungi", "Ubiquitous", Habitat)) |>
+  mutate(Habitat = if_else(phylum =="Arthropoda", "Ubiquitous", Habitat)) |>
+  mutate(Habitat = if_else(class =="Aves", "Terrestrial", Habitat)) |>
+  mutate(Habitat = if_else(kingdom =="Plantae", "Terrestrial", Habitat)) |>
+  mutate(Habitat = if_else(family == "Cyprinidae", "Brackish", Habitat)) |>
+  mutate(Habitat = if_else(class == "Squamata", "Terrestrial", Habitat)) |>
+  mutate(Habitat = if_else(class == "Carnivora", "Terrestrial", Habitat)) |>
+  mutate(otu = make.unique(as.character(otu)))
+
+# Microbial community
+batch1 <- read_csv("data/batch_1_bacteria.csv")
+batch2 <- read_csv("data/batch_2_bacteria.csv")
+
+
+df_bacteria <- merge(batch1,
+                      batch2, by = "name",
+                      all = TRUE) |>
+  rename_with(~ str_remove(., "\\.cladeReads$"),
+              .cols = everything()) |>
+  select(-taxRank.x, -Max.x) |>
+  rename("scientific_name" = "name") |>
+  rename_with(~ str_remove(., "\\.x$"),
+              .cols = everything()) |>
+  mutate(Habitat = "ubiquitous") |>
+  relocate(Habitat, .before = 4) |> 
+  mutate(status = "Expected") |>
+  relocate(status, .before = 7) |>
+  select(-matches("\\.y$")) |>
+  rename("otu" = "taxID") |>
+  rename("kingdom" = "Kingdom",
+         "phylum" = "Phylum",
+         "class" = "Class",
+         "order" = "Order",
+         "family" = "Family",
+         "genus" = "Genus") |>
+  mutate(otu = paste0("otu_", otu)) |>
+  mutate(across(11:113, ~ replace(., is.na(.)|. < 50, 0))) |>
+  filter(if_any(.cols = 11:113, ~. !=0))
+
+# Merged data: Find shared and unique columns
+shared_cols <- intersect(names(df_bacteria), 
+                         names(df_manuscript))
+
+unique_bacteria <- setdiff(names(df_bacteria),
+                           shared_cols)
+
+
+unique_manuscript <- setdiff(names(df_manuscript),
+                             shared_cols)
+
+# Add missing unique columns filled with 0 to each data frame
+df_bacteria_extended <- df_bacteria
+
+
+df_manuscript_extended <- df_manuscript |> 
+  mutate(across(all_of(unique_bacteria), ~ 0))
+
+
+# Now merge (inner join on the shared columns)
+df_project <- bind_rows(df_bacteria_extended,
+                       df_manuscript_extended) |>
+  mutate(across(11:117, ~ ifelse(is.na(.), 0, .))) |>
+  mutate(Habitat = case_when(
+    Habitat == "ubiquitous" ~ "Ubiquitous",
+    TRUE ~ Habitat)) |>
+  drop_na(otu) |>
+  distinct(otu, .keep_all = TRUE)
+
+
+# Assess the structure of the data
+sh_habita <- df_project |>
+  filter(is.na(Habitat)) |>
+  select(scientific_name)
+
+write.csv(sh_habita, "data/sh_habitat.csv")
+
+# Import the habitat data 
+sf_habitat <- read_csv("data/manual_habitat.csv") |>
+  select(scientific_name, Habitat)
+
+# First, ensure the data frames have the columns
+if(!all(c("scientific_name", "Habitat") %in% colnames(df_project))) {
+  stop("df_project must have columns: scientific_name, Habitat")
+}
+if(!all(c("scientific_name", "Habitat") %in% colnames(sf_habitat))) {
+  stop("sf_habitat must have columns: scientific_name, Habitat")
+}
+
+
+# Perform a left join for the two data sets
+df_project_updated <- df_project |> 
+  left_join(sf_habitat |>
+              select(scientific_name, Habitat_sf = Habitat),
+            by = "scientific_name") |> 
+  mutate(Habitat = if_else(is.na(Habitat),
+                           Habitat_sf, Habitat)) |> 
+  select(-Habitat_sf)
+
+# Update the new data frame
+df_project <- df_project_updated |>
+  distinct(otu, .keep_all = TRUE)
+
+sf_phylum <- read_csv("data/phylum.csv") |>
+  select(scientific_name, phylum)
+
+# First, ensure the data frames have the columns
+if(!all(c("scientific_name", "phylum") %in% colnames(df_project))) {
+  stop("df_project must have columns: scientific_name, phylum")
+}
+if(!all(c("scientific_name", "phylum") %in% colnames(sf_phylum))) {
+  stop("sf_phylum must have columns: scientific_name, phylum")
+}
+
+df_project_phylum <- df_project |> 
+  left_join(sf_phylum |>
+              select(scientific_name, phylum_sf = phylum),
+            by = "scientific_name") |> 
+  mutate(phylum = if_else(is.na(phylum),
+                           phylum_sf, phylum)) |> 
+  select(-phylum_sf)
+
+# Update the new data frame
+df_project <- df_project_phylum |>
+  distinct(otu, .keep_all = TRUE)
+
+#Obtain OTU from the data frame
+tax_table <- df_project |>
+  select(otu, Habitat, status,
+         kingdom, phylum, class, order,
+         family, genus, scientific_name) |>
+  tibble::column_to_rownames("otu")
+
+
+#Obtain taxa abundance data frame 
+df_abundance <- df_project |>
+  select(otu, 11:117) |>
+  tibble::column_to_rownames("otu")
+
+
+df_metadata <- read.csv("data/meta.csv") |>
+  janitor::clean_names() |>
+  filter(!str_ends(sample_id, "b")) |>
+  mutate(sample_id =
+           make.unique(as.character(sample_id))) |>
+  tibble::column_to_rownames("sample_id")
+
+
+#Transform to R6 class
+otu_table <- df_abundance |>
+  as.data.frame()
+
+tax_table <- df_project |>
+  select(otu, status, Habitat, kingdom,
+         phylum, class, order,
+         family, genus, scientific_name) |>
+  tibble::column_to_rownames("otu") |>
+  as.data.frame()
+
+df_microeco <- microtable$new(
+  otu_table = otu_table,
+  tax_table = tax_table,
+  sample_table = df_metadata
+)    
+
+#Transform into matrices otu and tax tables 
+df_otutax <- as.matrix(tax_table)
+df_abundance <- as.matrix(df_abundance)
+
+#Transform to S4 data class
+OTU <- otu_table(df_abundance,
+                 taxa_are_rows = TRUE)
+TAX <- tax_table(df_otutax)
+sample <- sample_data(df_metadata)
+
+
+df_phylo <- phyloseq(OTU,
+                     TAX, sample)
+```

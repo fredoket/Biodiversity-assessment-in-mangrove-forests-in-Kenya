@@ -1,0 +1,4264 @@
+---
+title: "eDNA_manuscript"
+format: html
+editor: visual
+---
+
+## Data analysis summary
+
+This script show step by step data processing, transformation and statistical analysis. It provides details of the whole data analysis steps, depicting key steps and showing what parameters were used.
+
+```{r setup, warning=FALSE, message=FALSE, echo=FALSE}
+
+#install.packages("pacman") Install once
+pacman::p_load(
+  tidyverse,
+  janitor,
+  ggsankeyfier,
+  ineq,
+  ggpubr,
+  ggpmisc,
+  ggrepel,
+  broom,
+  patchwork,
+  ggsankey,
+  viridis,
+  Kendall,
+  gtsummary,
+  vcd,
+  trend,
+  FactoMineR,
+  factoextra,
+  ggExtra,
+  pheatmap,
+  treemapify,
+  colorspace,
+  viridisLite,
+  reshape2
+)
+
+# Read and clean data
+df_eDNA <- readr::read_csv(
+  "data/df_eDNA.csv",
+  show_col_types = FALSE
+)
+
+df_NA <- readr::read_csv(
+  "data/species.csv",
+  show_col_types = FALSE
+) |>
+  janitor::clean_names()
+
+df_clean <- readr::read_csv(
+  "data/df_shaq.csv",
+  show_col_types = FALSE
+)
+
+df_shaq <- df_clean
+
+# Verify species names in GBIF and WoRMS
+# source("scripts/match_data_in_WORMS_GBIF.R")
+```
+
+# Study area
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# Script for generating study map
+source("scripts/eDNA_sampling_area_map.R")
+
+# Save the final map
+png_file <- file.path(
+  output_dir,
+  "eDNA_map.png"
+)
+
+pdf_file <- file.path(
+  output_dir,
+  "eDNA_map.pdf"
+)
+
+
+# Remove existing output file
+if (file.exists(png_file)) {
+  file.remove(png_file)
+}
+
+if (file.exists(pdf_file)) {
+  file.remove(pdf_file)
+}
+
+
+# Export high resolution png
+ggsave(
+  filename = png_file,
+  plot = final_map,
+  width = 12,
+  height = 9,
+  units = "in",
+  dpi = 600,
+  bg = "white"
+)
+
+
+# Export vector pdf
+ggsave(
+  filename = pdf_file,
+  plot = final_map,
+  width = 12,
+  height = 9,
+  units = "in",
+  device = grDevices::cairo_pdf,
+  bg = "white"
+)
+
+
+print(final_map)
+```
+
+# Number of studies identified in the review process
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+df_studies <- df_clean |>
+  filter(
+    !grepl("^Integration",
+           document_title,
+           ignore.case = TRUE)
+  ) |>
+  distinct(document_title)
+
+df_mention <- df_clean |>
+  filter(
+    !grepl("^Integration",
+           document_title,
+           ignore.case = TRUE)
+  ) |>
+  distinct(site, document_title) |>
+  count(site, name = "count") |>
+  mutate(
+    percentage = round(count / sum(count), 2)
+  )
+
+df_unique <- df_clean |>
+  filter(
+    !grepl("^Integration",
+           document_title,
+           ignore.case = TRUE)
+  ) |>
+  distinct(site, document_title) |>
+  mutate(
+    site = case_when(
+      site %in% c("Tudor Creek",
+                  "Mida Creek",
+                  "Gazi Bay") ~ "All",
+      TRUE ~ site
+    )
+  ) |>
+  count(site, name = "count") |>
+  mutate(
+    percentage = round(count / sum(count), 2)
+  )
+
+total_frequency <- sum(df_mention$count)
+
+total_frequency
+```
+
+# Historically documented taxa
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+taxa <- df_clean |>
+  distinct() |>
+  filter(
+    author != "Mwamburi et al,. 2023"
+  ) |>
+  mutate(
+    document_class = case_when(
+      document_class %in% c("Peer-reviewed", "Research article") ~ "Peer reviewed",
+      document_class %in% c("Manual", "Grey source") ~ "Grey source",
+      TRUE ~ document_class
+    )
+  ) |>
+  replace_na(
+    list(
+      kingdom = "Animalia",
+      class = "Teleostei",
+      species = "fish"
+    )
+  )
+
+kingdom <- taxa |>
+  group_by(kingdom) |>
+  summarise(
+    N = n_distinct(species),
+    .groups = "drop"
+  )
+
+phylum <- taxa |>
+  group_by(phylum) |>
+  summarise(
+    N = n_distinct(species),
+    .groups = "drop"
+  )
+
+class <- taxa |>
+  group_by(class) |>
+  summarise(
+    N = n_distinct(species),
+    .groups = "drop"
+  ) |>
+  mutate(
+    prop = N / sum(N) * 100
+  )
+
+family <- taxa |>
+  group_by(family) |>
+  summarise(
+    N = n_distinct(species),
+    .groups = "drop"
+  )
+
+genera <- taxa |>
+  group_by(genus) |>
+  summarise(
+    N = n_distinct(species),
+    .groups = "drop"
+  )
+
+gttable <- taxa |>
+  distinct(
+    site, kingdom, phylum, class, family, species
+  ) |>
+  mutate(
+    phylum = if_else(
+      is.na(phylum) & class == "Teleostei",
+      "Chordata",
+      phylum
+    )
+  )
+
+site_taxa <- gttable |>
+  group_by(site) |>
+  summarise(
+    count = n_distinct(class),
+    .groups = "drop"
+  ) |>
+  mutate(
+    prop = count / sum(count) * 100
+  )
+
+class_richness <- gttable |>
+  group_by(class) |>
+  summarise(
+    count = n_distinct(species),
+    .groups = "drop"
+  ) |>
+  mutate(
+    prop = count / sum(count) * 100
+  )
+```
+
+# Publication frequency by forest formation
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+df_site <- df_clean |>
+  filter(
+    assessment_method != "eDNA"
+  ) |>
+  distinct(
+    site, document_title
+  ) |>
+  count(
+    site,
+    name = "Publication"
+  ) |>
+  mutate(
+    site = if_else(
+      Publication < 2,
+      "Others",
+      site
+    )
+  ) |>
+  group_by(site) |>
+  summarise(
+    Publication = sum(Publication),
+    .groups = "drop"
+  ) |>
+  dplyr::rename(
+    Site = site
+  ) |>
+  mutate(
+    Percentage = round(Publication / sum(Publication) * 100, 1),
+    Label = as.character(Publication)
+  )
+```
+
+## Techniques used in the historical surveys
+
+```{r}
+df_tools <- df_clean |>
+  left_join(
+    df_NA,
+    by = "species",
+    suffix = c("", ".ref")
+  ) |>
+  mutate(
+    class = coalesce(
+      class,
+      class.ref,
+      "Teleostei"
+    ),
+    phylum = case_when(
+      phylum == "Chordata" &
+        class %in% c("Teleostei", "Aves", "Mammalia") ~ class,
+      TRUE ~ phylum
+    ),
+    tools = case_when(
+      str_detect(
+        tools,
+        regex(
+          "net|nets|sein|seins|gillnet|gillnets",
+          ignore_case = TRUE
+        )
+      ) ~ "Use of net",
+      tools == "DNA based technique" ~ "eDNA",
+      tools == "Direct observation" ~ "Observation",
+      tools == "Review of existing Primary data" ~ "Review",
+      TRUE ~ tools
+    )
+  ) |>
+  filter(
+    !is.na(class),
+    class != "Unknown",
+    !grepl(
+      "^Integration",
+      document_title,
+      ignore.case = TRUE
+    )
+  ) |>
+  distinct()
+
+
+# Prepare tool-class combinations
+df_tech <- df_tools |>
+  select(
+    tools,
+    class
+  ) |>
+  filter(
+    !is.na(tools),
+    !is.na(class)
+  ) |>
+  distinct() |>
+  mutate(
+    tools = case_when(
+      class == "Magnoliopsida" &
+        tools %in% c("Microscopy", "Use of net") ~ "Transect",
+      
+      class == "Malacostraca" &
+        tools == "Use of net" ~ "Observation",
+      
+      class == "Globothalamea" &
+        tools == "eDNA" ~ "Microscopy",
+      
+      class %in% c("Ulvophyceae", "Florideophyceae") &
+        tools == "Use of net" ~ "Observation",
+      
+      class == "Teleostei" &
+        tools == "Observation" ~ "Use of net",
+      
+      TRUE ~ tools
+    )
+  )
+
+```
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+# Prepare tool-class combinations
+df_tech <- df_tools |>
+  select(
+    tools,
+    class
+  ) |>
+  filter(
+    !is.na(tools),
+    !is.na(class)
+  ) |>
+  distinct() |>
+  mutate(
+    tools = case_when(
+      class == "Magnoliopsida" &
+        tools %in% c("Microscopy", "Use of net") ~ "Transect",
+      
+      class == "Malacostraca" &
+        tools == "Use of net" ~ "Observation",
+      
+      class == "Globothalamea" &
+        tools == "eDNA" ~ "Microscopy",
+      
+      class %in% c("Ulvophyceae", "Florideophyceae") &
+        tools == "Use of net" ~ "Observation",
+      
+      class == "Teleostei" &
+        tools == "Observation" ~ "Use of net",
+      
+      TRUE ~ tools
+    )
+  )
+
+
+# Generate frequency matrix
+freq_matrix <- df_tech |>
+  count(
+    tools,
+    class
+  ) |>
+  pivot_wider(
+    names_from = tools,
+    values_from = n,
+    values_fill = 0
+  ) |>
+  column_to_rownames("class")
+
+freq_matrix
+
+
+# Plot heatmap
+pheat1 <- pheatmap(
+  freq_matrix,
+  color = colorRampPalette(
+    c("#0723DE", "white", "#AB1F03")
+  )(100),
+  breaks = seq(
+    -4,
+    4,
+    length.out = 101
+  ),
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  angle_col = 90,
+  fontsize_row = 10,
+  fontsize_col = 10,
+  labels_row = parse(
+    text = paste0(
+      "italic('",
+      rownames(freq_matrix),
+      "')"
+    )
+  ),
+  cellwidth = 12,
+  cellheight = 10
+)
+
+pheat1
+
+```
+
+# Publication frequency by forest formation
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+w1 <- ggplot(
+  df_site,
+  aes(
+    x = reorder(str_wrap(Site, width = 10), -Publication),
+    y = Publication
+  )
+) +
+  geom_col(fill = "grey40") +
+  geom_text(
+    aes(label = Label),
+    vjust = -0.3,
+    size = 4.5
+  ) +
+  labs(
+    x = "Forest formation",
+    y = "Number of studies"
+  ) +
+  theme_classic() +
+  theme(
+  axis.title = element_text(size = 12),
+  axis.text.x = element_text(
+    size = 12,
+    angle = 90,
+    hjust = 1,
+    vjust = 0.5
+  ),
+  axis.text.y = element_text(size = 12)
+)
+
+
+# Publication frequency by survey technique
+df_techniq <- df_clean |>
+  filter(
+    !grepl("^Integration", document_title, ignore.case = TRUE)
+  ) |>
+  distinct(document_title, Method) |>
+  count(Method, name = "Number") |>
+  mutate(
+    Percentage = round(Number / sum(Number) * 100, 1),
+    Label = as.character(Number)
+  )
+
+w2 <- ggplot(
+  df_techniq,
+  aes(
+    x = reorder(str_wrap(Method, width = 10), -Number),
+    y = Number
+  )
+) +
+  geom_col(fill = "grey40") +
+  geom_text(
+    aes(label = Label),
+    vjust = -0.3,
+    size = 4.5
+  ) +
+  labs(
+    x = "Survey technique",
+    y = "Number of studies"
+  ) +
+  theme_classic() +
+  theme(
+  axis.title = element_text(size = 12),
+  axis.text.x = element_text(
+    size = 12,
+    angle = 90,
+    hjust = 1,
+    vjust = 0.5
+  ),
+  axis.text.y = element_text(size = 12)
+)
+
+
+# Combine plots
+combined_plot <- (w1 | w2) +
+  patchwork::plot_layout(
+    widths = c(0.5, 0.5),
+    guides = "collect",
+    axes = "collect",
+    axis_titles = "collect"
+  ) +
+  patchwork::plot_annotation(tag_levels = "a") &
+  theme(
+    plot.tag = element_text(
+      face = "bold",
+      size = 14.5
+    )
+  )
+
+combined_plot
+```
+
+# Spatial distribution of biodiversity assessment studies
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+df_lor <- df_clean |>
+  select(site, document_title) |>
+  drop_na() |>
+  unique() |>
+  group_by(site) |>
+  summarise(
+    studies = n_distinct(document_title)
+  )
+
+
+
+#Chi-square goodness-of-fit test
+chisq_result <- chisq.test(df_lor$studies)
+
+chisq_result
+
+# Gini value 
+gini_value <- Gini(df_lor$studies)
+gini_value
+
+lc <- Lc(df_lor$studies)
+
+lorenz_df <- data.frame(
+  cumulative_sites = lc$p,
+  cumulative_studies = lc$L
+)
+
+lor <- ggplot(
+  lorenz_df,
+  aes(
+    x = cumulative_sites,
+    y = cumulative_studies
+  )
+) +
+  geom_line(
+    color = "black",
+    linewidth = 1
+  ) +
+  geom_abline(
+    intercept = 0,
+    slope = 1,
+    linetype = "dashed",
+    color = "grey30"
+  ) +
+  ggtitle(
+    expression(bold("(a)"))
+  ) +
+  scale_x_continuous(
+    limits = c(0, 1.1),
+    expand = c(0, 0)
+  ) +
+  labs(
+    x = "Proportion of sites",
+    y = "Proportion of studies"
+  ) +
+  theme_classic() +
+  theme(
+    axis.title.x = element_text(
+      size = 12,
+      hjust = 0.5,
+      face = "bold"
+    ),
+    axis.title.y = element_text(
+      size = 12,
+      face = "bold",
+      colour = "black"
+    ),
+    axis.text.x = element_text(
+      size = 12,
+      colour = "black"
+    ),
+    axis.text.y = element_text(
+      size = 12,
+      colour = "black"
+    )
+  )
+
+lor
+```
+
+# Number of documents reviewed
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# Trend in the number of studies over the years
+df_studies <- df_clean |>
+  select(
+    year_of_publication, document_title
+  ) |>
+  unique() |>
+  group_by(year_of_publication) |>
+  summarise(
+    count = n_distinct(document_title)
+  ) |>
+  dplyr::rename(
+    Year = year_of_publication,
+    Publication = count
+  )
+
+plot_a <- ggplot(
+  df_studies,
+  aes(x = Year, y = Publication)
+) +
+  geom_point(
+    color = "black"
+  ) +
+  geom_smooth(
+    method = "lm",
+    formula = y ~ x,
+    color = "black",
+    fill = "grey30",
+    se = TRUE,
+    size = 1.5
+  ) +
+  stat_poly_eq(
+    aes(
+      label = paste(
+        "bold(",
+        after_stat(rr.label),
+        ")~~~bold(",
+        after_stat(p.value.label),
+        ")"
+      )
+    ),
+    formula = y ~ x,
+    parse = TRUE,
+    label.x = "middle",
+    label.y = "middle",
+    color = "black"
+  ) +
+  labs(
+    x = expression(bold("Year")),
+    y = expression(bold("Publications"))
+  ) +
+  ggtitle(
+    expression(bold("(a)"))
+  ) +
+  scale_y_continuous(
+    breaks = seq(0, 3, by = 1)
+  ) +
+  theme_classic() +
+  theme(
+    axis.title.x = element_text(
+      size = 12,
+      hjust = 0.5
+    ),
+    axis.title.y = element_text(
+      size = 12
+    ),
+    axis.text.x = element_text(
+      size = 12
+    ),
+    axis.text.y = element_text(
+      size = 12
+    )
+  )
+
+
+# Trend in the number of taxa recorded
+df_taxatrend <- df_clean |>
+  select(
+    year_of_publication, species
+  ) |>
+  unique() |>
+  group_by(year_of_publication) |>
+  summarise(
+    count = n_distinct(species)
+  )
+
+plot_b <- ggplot(
+  df_taxatrend,
+  aes(x = year_of_publication, y = count)
+) +
+  geom_point(
+    color = "black"
+  ) +
+  geom_smooth(
+    method = "lm",
+    formula = y ~ x,
+    color = "black",
+    fill = "grey30",
+    se = TRUE,
+    size = 1.5
+  ) +
+  stat_poly_eq(
+    aes(
+      label = paste(
+        "bold(",
+        after_stat(rr.label),
+        ")~~~bold(",
+        after_stat(p.value.label),
+        ")"
+      )
+    ),
+    formula = y ~ x,
+    parse = TRUE,
+    label.x = "middle",
+    label.y = "middle",
+    color = "black"
+  ) +
+  labs(
+    x = expression(bold("Year")),
+    y = expression(bold("Taxa"))
+  ) +
+  ggtitle(
+    expression(bold("(b)"))
+  ) +
+  scale_y_continuous(
+    breaks = seq(0, 300, by = 100)
+  ) +
+  theme_classic() +
+  theme(
+    axis.title.x = element_text(
+      size = 12,
+      hjust = 0.5
+    ),
+    axis.title.y = element_text(
+      size = 12
+    ),
+    axis.text.x = element_text(
+      size = 12
+    ),
+    axis.text.y = element_text(
+      size = 12
+    )
+  )
+```
+
+# Number of new species identified over the years
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+df_trend <- df_clean |>
+  dplyr::select(
+    year_of_publication,
+    species,
+    site,
+    document_title
+  ) |>
+  distinct() |>
+  dplyr::rename(year = year_of_publication) |>
+  mutate(
+    year = as.integer(year),
+    Species = trimws(species),
+    Site = trimws(site)
+  )
+
+# First year each species was recorded
+first_records <- df_trend |>
+  group_by(species) |>
+  summarise(
+    First_year = min(year, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Number of newly recorded species per year
+new_species_year <- first_records |>
+  count(First_year, name = "New_species") |>
+  dplyr::rename(year = First_year)
+
+# Mann-Kendall test
+mk_test <- MannKendall(new_species_year$New_species)
+
+tau <- round(mk_test$tau, 3)
+
+p_value <- format.pval(
+  mk_test$sl,
+  digits = 3,
+  eps = 0.001
+)
+
+# Trend plot
+pl_2 <- ggplot(
+  new_species_year,
+  aes(x = year, y = New_species)
+) +
+  geom_point(size = 3) +
+  geom_smooth(
+    method = "lm",
+    formula = y ~ x,
+    se = TRUE,
+    colour = "black"
+  ) +
+  annotate(
+    "text",
+    x = 1991,
+    y = max(new_species_year$New_species, na.rm = TRUE),
+    hjust = 0,
+    vjust = 1,
+    label = paste0(
+      "Mann–Kendall: τ = ", tau,
+      ", p ", p_value
+    ),
+    size = 4
+  ) +
+  ggtitle(expression(bold("(b)"))) +
+  scale_x_continuous(
+    limits = c(1988, 2026),
+    expand = c(0, 0)
+  ) +
+  labs(
+    x = "Year",
+    y = "New taxa recorded"
+  ) +
+  theme_classic()
+pl_2
+```
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+#plot_a + lor + plot_b + pl_2
+
+
+figur1 <-plot_a + lor + plot_b + pl_2 +
+  plot_layout(
+    design = "
+    AB
+    CD
+    "
+  )
+
+# Save as PDF
+ggsave(
+  filename = "figures/figur2.pdf",
+  plot = figur1,
+  width = 16,
+  height = 13,
+  units = "in",
+  device = cairo_pdf
+)
+
+# Save as PNG at 300 dpi
+ggsave(
+  filename = "figures/figur2.png",
+  plot = figur1,
+  width = 16,
+  height = 12,
+  units = "in",
+  dpi = 300
+)
+
+figur1
+```
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+df_chisq <- df_shaq |>
+  drop_na() |>
+  left_join(
+    df_NA,
+    by = "species",
+    suffix = c("", ".ref")
+  ) |>
+  mutate(
+    class = ifelse(
+      is.na(class),
+      class.ref,
+      class
+    ),
+    class = replace_na(
+      class,
+      "Teleostei"
+    )
+  ) |>
+  filter(
+    class != "Unknown"
+  ) |>
+  distinct() |>
+  select(
+    site, class, species, document_title
+  ) |>
+  drop_na(class) |>
+  group_by(
+    site, class
+  ) |>
+  summarise(
+    count = n_distinct(species)
+  )
+
+tab <- df_chisq |>
+  pivot_wider(
+    names_from = site,
+    values_from = count,
+    values_fill = 0
+  ) |>
+  column_to_rownames("class")
+
+tab <- xtabs(
+  count ~ class + site,
+  data = df_chisq
+)
+
+print(tab)
+
+chisq_test <- chisq.test(tab)
+
+chisq_test
+
+residuals <- chisq_test$stdres
+
+res_df <- melt(
+  residuals,
+  varnames = c("Species", "Site"),
+  value.name = "Residuals"
+) |>
+  drop_na()
+
+vir1 <- ggplot(
+  res_df,
+  aes(
+    x = Site,
+    y = Species,
+    fill = Residuals
+  )
+) +
+  geom_tile(
+    color = "white"
+  ) +
+  scale_fill_gradient2(
+    low = "blue",
+    high = "red",
+    mid = "grey90",
+    midpoint = 0
+  ) +
+  labs(
+    x = "Mangrove forest block",
+    y = "Class",
+    fill = "Residuals"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(
+      angle = 90,
+      vjust = 1,
+      face = "bold"
+    ),
+    axis.text.y = element_text(
+      face = "bold"
+    ),
+    axis.title.x = element_text(
+      face = "bold"
+    ),
+    axis.title.y = element_text(
+      face = "bold"
+    )
+  )
+
+vir1
+```
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+taxa <- df_clean |>
+  distinct() |>
+  filter(
+    author != "Mwamburi et al,. 2023"
+  ) |>
+  mutate(
+    document_class = case_when(
+      document_class == "Peer-reviewed" ~ "Peer reviewed",
+      document_class == "Manual" ~ "Grey source",
+      document_class == "Research article" ~ "Peer reviewed",
+      document_class == "Grey source" ~ "Grey source"
+    )
+  ) |>
+  replace_na(
+    list(
+      class = "Teleostei",
+      species = "fish",
+      kingdom = "Animalia"
+    )
+  )
+
+df_time <- taxa |>
+  mutate(
+    class = replace_na(class, "Teleostei"),
+    phylum = case_when(
+      phylum == "Chordata" & class == "Teleostei" ~ "Teleostei",
+      phylum == "Chordata" & class == "Aves" ~ "Aves",
+      phylum == "Chordata" & class == "Mammalia" ~ "Mammalia",
+      kingdom == "Bacteria" ~ "Bacteria",
+      kingdom == "Fungi" ~ "Fungi",
+      TRUE ~ phylum
+    ),
+    tools = case_when(
+      str_detect(
+        tools,
+        regex(
+          "net|nets|sein|seins|gillnet|gillnets",
+          ignore_case = TRUE
+        )
+      ) ~ "Nets",
+      tools == "DNA based technique" ~ "eDNA",
+      tools == "Direct observation" ~ "Observation",
+      tools == "Review of existing Primary data" ~ "Review",
+      phylum %in% c(
+        "Chlorophyta",
+        "Tracheophyta",
+        "Rhodophyta"
+      ) &
+        tools %in% c("Nets", "Microscopy") ~ "Transect",
+      TRUE ~ tools
+    )
+  ) |>
+  filter(
+    class != "Unknown"
+  ) |>
+  dplyr::rename(
+    year = year_of_publication
+  ) |>
+  mutate(
+    phylum = if_else(
+      phylum == "Chordata",
+      class,
+      phylum
+    ),
+    phylum = if_else(
+      is.na(phylum) & class == "Teleostei",
+      "Teleostei",
+      phylum
+    ),
+    tools = case_when(
+      phylum == "Teleostei" &
+        tools %in% c(
+          "eDNA",
+          "Traps",
+          "Transect",
+          "Observation",
+          "Microscopy"
+        ) ~ "Nets",
+      TRUE ~ tools
+    )
+  ) |>
+  select(
+    tools,
+    year,
+    phylum,
+    class,
+    species,
+    document_title
+  ) |>
+  drop_na(phylum) |>
+  distinct() |>
+  group_by(
+    year,
+    class
+  ) |>
+  summarise(
+    count = n_distinct(species),
+    .groups = "drop"
+  ) |> 
+  group_by(class) |> 
+  mutate(
+    n_occurrences = n(),
+    total_count = sum(count, na.rm = TRUE),
+    class = if_else(
+      n_occurrences < 3 | total_count < 10,
+      "Others",
+      class
+    )
+  ) |> 
+  ungroup() |> 
+  select(-n_occurrences, -total_count)
+
+
+df_year <- df_time |>
+  as.data.frame() |>
+  group_by(class) |>
+  arrange(year) |>
+  mutate(
+    cumulative = cumsum(count)
+  ) |>
+  ungroup()
+
+df_year$year <- as.numeric(df_year$year)
+
+df_labels <- df_year |>
+  group_by(class) |>
+  filter(
+    year == max(year)
+  ) |>
+  ungroup()
+
+custom_colors <- c(
+  "Aves"          = "#56B4E9",
+  "Chromadorea"   = "#009E73",
+  "Enoplea"       = "#E69F00",
+  "Gastropoda"    = "#F0E442",
+  "Magnoliopsida" = "#D55E00",
+  "Malacostraca"  = "#CC79A7",
+  "Mammalia"      = "#AA4499",
+  "Others"        = "#999999",
+  "Teleostei"     = "#0072B2"
+)
+
+r3 <- ggplot(
+  df_year,
+  aes(
+    x = year,
+    y = cumulative,
+    color = class,
+    group = class
+  )
+) +
+  geom_line(
+    size = 0.9
+  ) +
+  geom_point(
+    size = 2
+  ) +
+  labs(
+    x = "Year",
+    y = "Cumulative total",
+    color = ""
+  ) +
+  ggtitle(
+    expression(bold("(c)"))
+  ) +
+  scale_x_continuous(
+    limits = c(1990, 2026),
+    expand = c(0, 0)
+  ) +
+  theme_classic(
+    base_size = 12
+  ) +
+  theme(
+    legend.position = "right",
+    axis.text.x = element_text(
+      size = 12,
+      angle = 0,
+      vjust = 0.5
+    ),
+    axis.text.y = element_text(
+      size = 12,
+      face = "italic"
+    ),
+    axis.title.x = element_text(
+      size = 12,
+      face = "bold"
+    ),
+    axis.title.y = element_text(
+      size = 12,
+      face = "bold"
+    )
+  ) +
+  scale_color_manual(
+    values = custom_colors
+  )
+
+r3
+```
+
+# Temporal patterns of biodiversity records
+
+```{r}
+taxa <- df_clean |>
+  distinct() |>
+  filter(
+    author != "Mwamburi et al,. 2023"
+  ) |>
+  mutate(
+    document_class = case_when(
+      document_class %in% c("Peer-reviewed", "Research article") ~ "Peer reviewed",
+      document_class %in% c("Manual", "Grey source") ~ "Grey source"
+    )
+  ) |>
+  replace_na(
+    list(
+      class = "Teleostei",
+      species = "fish",
+      kingdom = "Animalia"
+    )
+  )
+
+df_time <- taxa |>
+  mutate(
+    class = replace_na(class, "Teleostei"),
+    phylum = case_when(
+      phylum == "Chordata" & class == "Teleostei" ~ "Teleostei",
+      phylum == "Chordata" & class == "Aves" ~ "Aves",
+      phylum == "Chordata" & class == "Mammalia" ~ "Mammalia",
+      kingdom == "Bacteria" ~ "Bacteria",
+      kingdom == "Fungi" ~ "Fungi",
+      TRUE ~ phylum
+    ),
+    tools = case_when(
+      str_detect(
+        tools,
+        regex(
+          "net|nets|sein|seins|gillnet|gillnets",
+          ignore_case = TRUE
+        )
+      ) ~ "Nets",
+      tools == "DNA based technique" ~ "eDNA",
+      tools == "Direct observation" ~ "Observation",
+      tools == "Review of existing Primary data" ~ "Review",
+      phylum %in% c(
+        "Chlorophyta",
+        "Tracheophyta",
+        "Rhodophyta"
+      ) &
+        tools %in% c("Nets", "Microscopy") ~ "Transect",
+      TRUE ~ tools
+    )
+  ) |>
+  filter(
+    class != "Unknown"
+  ) |>
+  dplyr::rename(
+    year = year_of_publication
+  ) |>
+  mutate(
+    phylum = if_else(
+      phylum == "Chordata",
+      class,
+      phylum
+    ),
+    phylum = if_else(
+      is.na(phylum) & class == "Teleostei",
+      "Teleostei",
+      phylum
+    ),
+    tools = case_when(
+      phylum == "Teleostei" &
+        tools %in% c(
+          "eDNA",
+          "Traps",
+          "Transect",
+          "Observation",
+          "Microscopy"
+        ) ~ "Nets",
+      TRUE ~ tools
+    )
+  ) |>
+  select(
+    tools,
+    year,
+    phylum,
+    class,
+    species,
+    document_title
+  ) |>
+  drop_na(phylum) |>
+  distinct() |>
+  group_by(
+    year,
+    class
+  ) |>
+  summarise(
+    count = n_distinct(species),
+    .groups = "drop"
+  ) |> 
+  group_by(class) |>
+  mutate(
+    n_occurrences = n(),
+    total_count = sum(count, na.rm = TRUE),
+    class = if_else(
+      (n_occurrences == 1 | total_count < 5) &
+        !class %in% c("Gastropoda", "Mammalia"),
+      "Others",
+      class
+    )
+  ) |>
+  ungroup() |>
+  select(-n_occurrences, -total_count)
+
+```
+
+```{r}
+df_raw <- df_time
+
+custom_colors <- c(
+  "Aves"          = "#56B4E9",
+  "Chromadorea"   = "#009E73",
+  "Enoplea"       = "#E69F00",
+  "Gastropoda"    = "#F0E442",
+  "Magnoliopsida" = "#D55E00",
+  "Malacostraca"  = "#CC79A7",
+  "Mammalia"      = "#AA4499",
+  "Others"        = "#999999",
+  "Teleostei"     = "#0072B2"
+)
+df_stream <- df_raw |>
+  group_by(
+    year,
+    class
+  ) |>
+  summarise(
+    count = sum(count),
+    .groups = "drop"
+  ) |>
+  complete(
+    year = full_seq(year, 1),
+    class,
+    fill = list(count = 0)
+  ) |>
+  mutate(
+    class = factor(
+      class,
+      levels = names(custom_colors)
+    )
+  ) |>
+  arrange(
+    year,
+    class
+  )
+
+df_stream <- df_stream |>
+  group_by(year) |>
+  mutate(
+    ymax = cumsum(count) - sum(count) / 2,
+    ymin = ymax - count
+  ) |>
+  ungroup()
+
+df_smooth <- df_stream |>
+  group_by(class) |>
+  group_modify(~ {
+    yrs <- seq(
+      min(.x$year),
+      max(.x$year),
+      length.out = 200
+    )
+
+    tibble(
+      year = yrs,
+      ymin = spline(
+        .x$year,
+        .x$ymin,
+        xout = yrs,
+        method = "natural"
+      )$y,
+      ymax = spline(
+        .x$year,
+        .x$ymax,
+        xout = yrs,
+        method = "natural"
+      )$y
+    )
+  }) |>
+  ungroup()
+
+stream_plot <- ggplot(
+  df_smooth,
+  aes(
+    x = year,
+    ymin = ymin,
+    ymax = ymax,
+    fill = class,
+    group = class
+  )
+) +
+  geom_ribbon(
+    colour = NA,
+    alpha = 0.95
+  ) +
+  labs(
+    x = "Year",
+    y = "Records per year",
+    fill = ""
+  ) +
+  ggtitle(
+    expression(bold("(c)"))
+  ) +
+  scale_x_continuous(
+    limits = c(1990, 2026),
+    expand = c(0, 0)
+  ) +
+  scale_fill_manual(
+    values = custom_colors
+  ) +
+  theme_classic(
+    base_size = 12
+  ) +
+  theme(
+    legend.position = "right",
+    axis.text.x = element_text(
+      size = 12
+    ),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.title.x = element_text(
+      size = 12,
+      face = "bold"
+    ),
+    axis.title.y = element_text(
+      size = 12,
+      face = "bold"
+    )
+  )
+
+stream_plot
+```
+
+# Temporal accumulation of taxonomic records by site
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+df_cover <- df_clean |>
+  dplyr::select(
+    year_of_publication,
+    site,
+    species
+  ) |>
+  distinct() |>
+  group_by(
+    year_of_publication,
+    site
+  ) |>
+  summarise(
+    n = n_distinct(species),
+    .groups = "drop"
+  )
+
+# Identify sites appearing only once
+site_frequency <- df_cover |>
+  count(site, name = "appearance")
+
+# Merge single-appearance sites into Others
+df_cover <- df_cover |>
+  left_join(site_frequency, by = "site") |>
+  mutate(
+    site = if_else(appearance ==1, "Others", site)
+  ) |>
+  group_by(
+    year_of_publication,
+    site
+  ) |>
+  summarise(
+    n = sum(n),
+    .groups = "drop"
+  ) |>
+  as.data.frame() |>
+  group_by(site) |>
+  arrange(year_of_publication) |>
+  mutate(
+    cumulative = cumsum(n)
+  ) |>
+  ungroup() |>
+  dplyr::rename(
+    year = year_of_publication
+  )
+
+df_cover$year <- as.numeric(df_cover$year)
+
+# Last data point for each site
+df_label <- df_cover |>
+  group_by(site) |>
+  filter(year == max(year)) |>
+  ungroup()
+
+# Cumulative graph
+k1 <- ggplot(
+  df_cover,
+  aes(
+    x = year,
+    y = cumulative,
+    group = site
+  )
+) +
+  geom_line(
+    size = 0.9,
+    colour = "black"
+  ) +
+  geom_point(
+    size = 2,
+    colour = "black"
+  ) +
+  geom_text(
+    data = df_label,
+    aes(label = site),
+    colour = "black",
+    hjust = -0.1,
+    size = 3.5,
+    show.legend = FALSE
+  ) +
+  labs(
+    x = "Year",
+    y = "Cumulative total"
+  ) +
+  ggtitle(expression(bold("(d)"))) +
+  scale_x_continuous(
+    limits = c(1988, 2026),
+    expand = c(0, 0)
+  ) +
+  theme_classic(base_size = 12) +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_text(
+      size = 12,
+      face = "italic"
+    ),
+    axis.title.x = element_text(
+      size = 12,
+      face = "bold"
+    ),
+    axis.title.y = element_text(
+      size = 12,
+      face = "bold"
+    )
+  )
+k1
+```
+
+# Combined graphs
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+figure <- r3 + stream_plot + vir1 +  k1 +
+  plot_layout(
+    design = "
+    AB
+    CD
+    "
+  )
+
+# Save as PDF
+ggsave(
+  filename = "figure.pdf",
+  plot = figure,
+  width = 16,
+  height = 13,
+  units = "in",
+  device = cairo_pdf
+)
+
+# Save as PNG at 300 dpi
+ggsave(
+  filename = "figure.png",
+  plot = figure,
+  width = 16,
+  height = 12,
+  units = "in",
+  dpi = 600
+)
+
+figure
+```
+
+# Sankey plot
+
+```{r}
+source("scripts/taxa_count_manual.R")
+
+df_sank_long <- df_sankf |>
+  make_long(
+    `Year of publication`,
+    `Documet type`,
+    `Forest location`,
+    `Survey technique`,
+    `Documented taxa`
+  )
+
+t1 <- ggplot(
+  df_sank_long,
+  aes(
+    x = x,
+    next_x = next_x,
+    node = node,
+    next_node = next_node,
+    fill = factor(node)
+  )
+) +
+  geom_sankey(
+    flow.alpha = 0.4,
+    show.legend = FALSE
+  ) +
+  geom_sankey(
+    flow.alpha = 0.3,
+    node.color = "grey90",
+    node.alpha = 0.4,
+    node.width = 0.001,
+    show.legend = FALSE
+  ) +
+  geom_sankey_label(
+    aes(
+      label = node,
+      hjust = case_when(
+        x == "Year of publication" ~ 1.5,
+        x == "Document type" ~ -0.1,
+        x == "Forest location" ~ -0.1,
+        x == "Survey technique" ~ -0.1,
+        x == "Taxa number" ~ -0.1,
+        x == "Documented taxa" ~ -0.15,
+        TRUE ~ -0.2
+      ),
+      vjust = 0.7
+    ),
+    size = 4.2,
+    fill = "white",
+    color = "black"
+  ) +
+  theme_sankey(
+    base_size = 18
+  ) +
+  scale_fill_viridis_d(
+    option = "cividis",
+    begin = 0.1,
+    end = 0.9
+  ) +
+  theme(
+    panel.spacing = unit(17, "lines"),
+    plot.margin = margin(0.5, 0.5, 2, 2)
+  ) +
+  labs(
+    x = NULL
+  )
+
+t1
+```
+
+# Relative proportion of taxa assessed across different forest formations
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+cols <- qualitative_hcl(15, palette = "Dynamic")
+cols
+cols <- viridis(15, option = "turbo")
+
+df_comp <- df_clean |>
+  dplyr::select(site, kingdom, class, species) |>
+  drop_na() |>
+  unique() |>
+  group_by(site, kingdom, class) |>
+  summarise(
+    count = n_distinct(species)
+  )
+  
+ggplot(df_comp, aes(
+  area = count,
+  fill = site,
+  label = class,
+  subgroup = site
+)) +
+  geom_treemap() +
+  geom_treemap_subgroup_border(colour = "white") +
+  geom_treemap_text(
+    colour = "white",
+    place = "centre",
+    grow = TRUE
+  ) +
+  scale_fill_manual(values = cols) +
+  theme_minimal()
+```
+
+# Relative proportion of taxonomic families across classes in historical records
+
+```{r}
+df_freq <- df_clean |>
+  dplyr::select(site, class, family, species ) |>
+  drop_na() |>
+  unique() |>
+  group_by(class, family) |>
+  summarise(
+    count = n_distinct(species)
+  )
+  
+
+df <- df_freq
+
+# Draw a graph for the map
+ggplot(df_freq, aes(
+  area = count,
+  fill = class,
+  label = family,
+  subgroup = class
+)) +
+  geom_treemap() +
+  geom_treemap_subgroup_border(colour = "white") +
+  geom_treemap_text(
+    colour = "white",
+    place = "centre",
+    grow = TRUE
+  ) +
+  scale_fill_viridis_d(option = "A") +
+  theme_minimal()
+```
+
+## Class-level deviation from expected taxonomic representation
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+# Prepare data for chi-square goodness-of-fit test
+df_chi_sq <- df_clean |>
+  select(-1) |>
+  distinct() |>
+  drop_na(class)
+
+
+# Count observations per class
+species_counts <- table(df_chi_sq$class)
+
+species_counts
+
+
+# Chi-square goodness-of-fit test
+chi <- chisq.test(species_counts)
+
+chi
+
+
+# Extract standardized Pearson residuals
+residuals <- chi$stdres
+
+residuals
+
+
+# Prepare residuals for plotting
+res_df <- data.frame(
+  Species = names(residuals),
+  Residuals = residuals,
+  Count = as.vector(species_counts)
+)
+
+res_df
+
+
+# Plot standardized Pearson residuals
+x1 <- ggplot(
+  res_df,
+  aes(
+    x = reorder(
+      Species,
+      Residuals.Freq
+    ),
+    y = Residuals.Freq,
+    fill = Residuals.Freq > 0
+  )
+) +
+  geom_col() +
+  coord_flip() +
+  scale_fill_manual(
+    values = c(
+      "TRUE" = "steelblue",
+      "FALSE" = "tomato"
+    )
+  ) +
+  labs(
+    x = "Class",
+    y = "Pearson residuals"
+  ) +
+  theme_alluvial(
+    base_size = 14
+  ) +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(
+      size = 12,
+      angle = 90,
+      vjust = 0.5
+    ),
+    axis.text.y = element_text(
+      size = 12,
+      face = "italic"
+    ),
+    axis.title.x = element_text(
+      size = 12,
+      face = "bold"
+    ),
+    axis.title.y = element_text(
+      size = 12,
+      face = "bold"
+    )
+  )
+
+x1
+```
+
+```{r}
+df_kruskal <- df_clean |>
+  filter(!grepl("^Integration", document_title,
+                ignore.case = TRUE)) |> 
+  select(site, document_title) |>
+  drop_na() |>
+  group_by(site) |>
+  summarise(count = n_distinct(document_title)) |>
+  mutate(prop = count / sum(count) * 100)
+  
+total_frequency <- sum(df_kruskal$count)
+
+kruskal.test(count ~ site, data = df_kruskal)
+```
+
+# Environmental DNA analysis
+
+This section describes the workflow used for pre-processing, data wrangling, and validation of eDNA-derived biodiversity data. The workflow is organised into two sections. Section 1 describes the data cleaning and taxonomic validation steps used to generate the S6 data class. Section 2 uses the resulting S6 data class for downstream analysis.
+
+## Section 1: Data cleaning and taxonomic validation
+
+This section describes the data cleaning, wrangling, and taxonomic validation procedures used to generate the S6 data class. The workflow was run once to produce the S6 data class, which is then used as the input for subsequent analyses.
+
+If the S6 data class is already available, this section does not need to be rerun. The S6 data class can instead be loaded directly and used for the analyses described in Section 2.
+
+```{r}
+# Load the required packages
+# Install.packages("pacman"): Install only once
+pacman::p_load(
+  phyloseq,
+  biomformat,
+  tidyverse,
+  rgbif,
+  tidyr,
+  worrms,
+  microeco,
+  magrittr,
+  aplot,
+  metacoder,
+  janitor,
+  lubridate,
+  readr,
+  dplyr,
+  purrr,
+  stringr,
+  gt
+)
+```
+
+### Importing the required data
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+# Load the data
+df1 <- read_csv(
+  "data/taxa.csv"
+)
+
+df2 <- read_csv(
+  "data/taxar.csv"
+)
+
+
+# Check similarity (optional diagnostics)
+similar_columns <- intersect(
+  names(df1),
+  names(df2)
+)
+
+different_columns <- setdiff(
+  union(
+    names(df1),
+    names(df2)
+  ),
+  similar_columns
+)
+
+cat(
+  "Shared columns:",
+  paste(
+    similar_columns,
+    collapse = ", "
+  ),
+  "\n"
+)
+
+cat(
+  "Unique columns:",
+  paste(
+    different_columns,
+    collapse = ", "
+  ),
+  "\n"
+)
+
+
+# Merge files by a common identifier
+merged_df <- merge(
+  df1,
+  df2,
+  by = "name",
+  all = TRUE
+)
+
+
+# Extract and sort column names from column 3 to 113
+sorted_cols <- sort(
+  names(merged_df)[1:116]
+)
+
+
+# Apply column selection and reordering
+df_deDNA <- merged_df |>
+  select(
+    1:2,
+    all_of(sorted_cols),
+    everything()
+  ) |>
+  select(
+    -lineage.x,
+    -taxRank.y,
+    -taxID.y,
+    -lineage.y,
+    -Max.x,
+    -Max.y,
+    -taxRank.x
+  ) |>
+  mutate(
+    name = gsub(
+      "\\[|\\]",
+      "",
+      name
+    )
+  ) |>
+  rename_with(
+    ~ str_remove(
+      .,
+      "\\.cladeReads$"
+    ),
+    .cols = everything()
+  ) |>
+  relocate(
+    taxID.x,
+    .before = 2
+  ) |>
+  mutate(
+    across(
+      3:109,
+      ~ replace(
+        .,
+        is.na(.) | . < 5,
+        0
+      )
+    )
+  ) |>
+  filter(
+    if_any(
+      .cols = 3:109,
+      ~ . != 0
+    )
+  ) |>
+  rename(
+    scientific_name = name,
+    otu = taxID.x
+  ) |>
+  select(
+    scientific_name,
+    otu,
+    everything()
+  ) |>
+  drop_na(otu)
+```
+
+### Validation of eDNA detections against the regional species inventory
+
+This section describes the validation of eDNA-derived species detection against a regional species inventory. Taxonomic names detected through eDNA are compared with species records compiled from regional biodiversity databases. The validation relies on the Global Biodiversity Information Facility (GBIF; https://www.gbif.org/) and requires an active internet connection to query and validate taxonomic names. This step is memory intensive and may require substantial RAM when processing large taxon lists.
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+
+# Filter out taxa that do not conform to binomial nomenclature
+pattern <- "^[A-Z][a-z]+\\s[A-Z]?[a-z]+$"
+
+
+# Load inventoried data sets
+gbif <- read_csv(
+  "inventory_data/gbif_.csv"
+) |>
+  select(
+    species
+  ) |>
+  drop_na() |>
+  unique() |>
+  rename(
+    scienticname = species
+  )
+
+obis <- read_csv(
+  "inventory_data/obis.csv"
+) |>
+  select(
+    scientificname
+  ) |>
+  unique()
+
+fishbase <- read_csv(
+  "inventory_data/fishbase.csv"
+) |>
+  janitor::clean_names() |>
+  select(
+    species
+  ) |>
+  unique() |>
+  rename(
+    scientificname = species
+  )
+
+worm <- read_csv(
+  "inventory_data/WoRMS.csv"
+) |>
+  janitor::clean_names() |>
+  select(
+    scientific_name
+  ) |>
+  unique() |>
+  rename(
+    scientificname = scientific_name
+  )
+
+
+# GBIF function
+lit <- read_csv(
+  "inventory_data/litsurv.csv",
+  show_col_types = FALSE
+) |>
+  janitor::clean_names() |>
+  select(
+    taxon_name
+  ) |>
+  drop_na() |>
+  distinct() |>
+  filter(
+    !str_detect(
+      taxon_name,
+      regex(
+        "\\b(sp|spp|sp1)(\\.|$)",
+        ignore_case = TRUE
+      )
+    ),
+    str_count(
+      taxon_name,
+      "\\S+"
+    ) > 1
+  )
+
+
+# Batch function for GBIF database querying
+check_names_batch <- function(
+  names,
+  batch_size = 100,
+  output_file = "lit_checked_partial.csv"
+) {
+  batches <- split(
+    names,
+    ceiling(
+      seq_along(names) / batch_size
+    )
+  )
+  
+  total_batches <- length(batches)
+  
+  results <- map2_dfr(
+    batches,
+    seq_along(batches),
+    function(batch, idx) {
+      message(
+        "\n🔎 Processing batch ",
+        idx,
+        " of ",
+        total_batches,
+        " (",
+        length(batch),
+        " names)"
+      )
+      
+      # Attempt query with retry logic
+      for (attempt in 1:3) {
+        res <- tryCatch(
+          name_backbone_checklist(
+            data.frame(
+              name = batch
+            )
+          ),
+          error = function(e) e
+        )
+        
+        if (!inherits(res, "error")) {
+          message(
+            "✅ Batch ",
+            idx,
+            " completed successfully."
+          )
+          
+          # Ensure consistent column types
+          res <- res |>
+            mutate(
+              across(
+                everything(),
+                as.character
+              )
+            )
+          
+          if (!is.null(output_file)) {
+            if (file.exists(output_file)) {
+              existing <- read_csv(
+                output_file,
+                show_col_types = FALSE
+              ) |>
+                mutate(
+                  across(
+                    everything(),
+                    as.character
+                  )
+                )
+              
+              combined <- bind_rows(
+                existing,
+                res
+              )
+              
+              write_csv(
+                combined,
+                output_file
+              )
+            } else {
+              write_csv(
+                res,
+                output_file
+              )
+            }
+          }
+          
+          Sys.sleep(
+            runif(
+              1,
+              1.5,
+              3.5
+            )
+          )
+          
+          return(res)
+        } else {
+          message(
+            "⚠️ Attempt ",
+            attempt,
+            " failed for batch ",
+            idx,
+            ": ",
+            conditionMessage(res)
+          )
+          
+          Sys.sleep(5)
+        }
+      }
+      
+      message(
+        "❌ Batch ",
+        idx,
+        " failed after 3 attempts, skipping."
+      )
+      
+      tibble()
+    }
+  )
+  
+  return(results)
+}
+
+
+# Run the query safely
+lit_checked <- check_names_batch(
+  lit$taxon_name,
+  batch_size = 100
+)
+
+
+
+
+#source("scripts/gbif_2.R")
+
+all_results <- name_backbone_checklist(
+  lit$taxon_name
+)
+
+
+lite <- read_csv(
+  "data/lit_csv_1.csv"
+) |>
+  select(
+    species
+  ) |>
+  drop_na() |>
+  rename(
+    scientificname = species
+  )
+
+
+# List of data to merge
+inventory <- list(
+  gbif,
+  obis,
+  fishbase,
+  worm,
+  lite
+)
+
+
+# Standardize column names for all data sets
+inventory <- lapply(
+  inventory,
+  function(df) {
+    colnames(df) <- "scientificname"
+    return(df)
+  }
+)
+
+
+# Merge all the data sets
+df_inventory <- do.call(
+  rbind,
+  inventory
+) |>
+  unique()
+
+
+# Filter and remove non-binomial nomenclature names
+df_inventory <- df_inventory |>
+  filter(
+    grepl(
+      pattern,
+      scientificname
+    )
+  )
+
+
+df_match <- df_deDNA |>
+  select(
+    scientific_name
+  )
+
+
+# Add a new column to store match results
+df_match$match_results <- ifelse(
+  df_deDNA$scientific_name %in% df_inventory$scientificname,
+  "Expected",
+  "Unexpected"
+)
+
+```
+
+## Merging and validation
+
+This step involves merging the datasets generated during the preceding analyses, assigning inclusion and exclusion categories, and validating taxonomic names against the Global Biodiversity Information Facility (GBIF) where necessary.
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+df_eDNA <- full_join(
+  df_deDNA,
+  df_match,
+  by = "scientific_name"
+)
+
+
+# GBIF taxonomic validation
+# source("scripts/gbif_2.R")
+
+# df_egbif <- name_backbone_checklist(
+#   df_eDNA$scientific_name
+# )
+
+
+df_egbif <- read_csv(
+  "data/df_edna_11.csv"
+)
+
+
+# Clean GBIF taxonomic classification
+df_egbif_clean <- df_egbif |>
+  select(
+    kingdom,
+    phylum,
+    class,
+    order,
+    family,
+    genus,
+    verbatimScientificName
+  ) |>
+  rename(
+    species = verbatimScientificName
+  )
+
+
+df_na_class <- df_egbif |>
+  filter(
+    is.na(class)
+  )
+
+
+species_list <- df_egbif |>
+  distinct() |>
+  janitor::clean_names() |>
+  select(
+    verbatim_scientific_name
+  ) |>
+  pull()
+
+
+# Break into chunks of 1000
+species_chunks <- split(
+  species_list,
+  ceiling(
+    seq_along(species_list) / 1000
+  )
+)
+
+
+# Break into sub-chunks of 50 names
+match_worms_subchunk <- function(names_50) {
+  tryCatch(
+    {
+      Sys.sleep(5)
+      wm_records_names(names_50)
+    },
+    error = function(e) {
+      message(
+        "Error: ",
+        conditionMessage(e)
+      )
+      return(NULL)
+    }
+  )
+}
+
+
+# Function to process one 1000-chunk
+process_chunk <- function(species_chunk) {
+  sub_chunks <- split(
+    species_chunk,
+    ceiling(
+      seq_along(species_chunk) / 50
+    )
+  )
+  
+  map_dfr(
+    sub_chunks,
+    match_worms_subchunk
+  )
+}
+
+
+# Process all 1000-chunks
+all_matches <- map_dfr(
+  species_chunks,
+  process_chunk
+)
+
+
+df_worms <- all_matches |>
+  select(
+    kingdom,
+    phylum,
+    class,
+    order,
+    family,
+    genus,
+    scientificname,
+    isMarine,
+    isBrackish,
+    isFreshwater,
+    isTerrestrial,
+    isExtinct
+  ) |>
+  rename(
+    species = scientificname
+  ) |>
+  mutate(
+    across(
+      isMarine:isExtinct,
+      ~ replace_na(
+        .,
+        0
+      )
+    )
+  ) |>
+  mutate(
+    Habitat = case_when(
+      isMarine == 1 &
+        isBrackish == 1 &
+        isFreshwater == 1 &
+        isTerrestrial == 1 ~ "Brackish",
+      
+      isMarine == 1 &
+        isBrackish == 1 &
+        isFreshwater == 1 ~ "Brackish",
+      
+      isMarine == 1 &
+        isBrackish == 1 ~ "Brackish",
+      
+      isMarine == 1 &
+        isFreshwater == 1 &
+        isTerrestrial == 1 ~ "Brackish",
+      
+      isTerrestrial == 1 &
+        isMarine != 1 &
+        isBrackish != 1 ~ "Brackish",
+      
+      isMarine == 1 &
+        isBrackish != 1 &
+        isFreshwater != 1 &
+        isTerrestrial != 1 ~ "Marine",
+      
+      isMarine != 1 &
+        isBrackish == 1 &
+        isFreshwater == 1 &
+        isTerrestrial != 1 ~ "Brackish",
+      
+      isMarine == 1 &
+        isBrackish != 1 &
+        isFreshwater != 1 &
+        isTerrestrial == 1 ~ "Brackish",
+      
+      isMarine != 1 &
+        isBrackish == 1 &
+        isFreshwater == 1 &
+        isTerrestrial == 1 ~ "Brackish",
+      
+      isMarine == 1 &
+        isBrackish != 1 &
+        isFreshwater == 1 &
+        isTerrestrial != 1 ~ "Brackish",
+      
+      isMarine != 1 &
+        isBrackish == 1 &
+        isFreshwater != 1 &
+        isTerrestrial != 1 ~ "Brackish",
+      
+      isMarine != 1 &
+        isBrackish == 1 &
+        isFreshwater != 1 &
+        isTerrestrial == 1 ~ "Brackish",
+      
+      TRUE ~ NA_character_
+    )
+  )
+
+
+df_feDNA <- df_egbif_clean |>
+  left_join(
+    df_worms |>
+      select(
+        species,
+        class,
+        Habitat
+      ),
+    by = "species",
+    suffix = c(
+      ".clean",
+      ".worms"
+    )
+  ) |>
+  mutate(
+    class = coalesce(
+      class.clean,
+      class.worms
+    )
+  ) |>
+  select(
+    -class.clean,
+    -class.worms
+  ) |>
+  rename(
+    scientific_name = species
+  ) |>
+  drop_na(kingdom)
+```
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+# Merge all datasets
+df_manuscript <- full_join(
+  df_feDNA,
+  df_eDNA,
+  by = "scientific_name"
+) |>
+  filter(
+    otu != 0
+  ) |>
+  mutate(
+    otu = paste0(
+      "otu_",
+      otu
+    )
+  ) |>
+  rename(
+    status = match_results
+  ) |>
+  mutate(
+    otu = make.unique(
+      as.character(otu)
+    )
+  )
+
+df_aves <- df_manuscript |>
+  filter(
+    is.na(Habitat)
+  ) |>
+  select(
+    scientific_name
+  )
+
+write.csv(
+  df_aves,
+  "data/b_aves.csv"
+)
+
+# Microbial community
+batch1 <- read_csv(
+  "data/batch_1_bacteria.csv"
+)
+
+batch2 <- read_csv(
+  "data/batch_2_bacteria.csv"
+)
+
+df_bacteria <- merge(
+  batch1,
+  batch2,
+  by = "name",
+  all = TRUE
+) |>
+  rename_with(
+    ~ str_remove(
+      .,
+      "\\.cladeReads$"
+    ),
+    .cols = everything()
+  ) |>
+  select(
+    -taxRank.x,
+    -Max.x
+  ) |>
+  rename(
+    scientific_name = name
+  ) |>
+  rename_with(
+    ~ str_remove(
+      .,
+      "\\.x$"
+    ),
+    .cols = everything()
+  ) |>
+  mutate(
+    Habitat = "ubiquitous"
+  ) |>
+  relocate(
+    Habitat,
+    .before = 4
+  ) |>
+  mutate(
+    status = "Expected"
+  ) |>
+  relocate(
+    status,
+    .before = 7
+  ) |>
+  select(
+    -matches("\\.y$")
+  ) |>
+  rename(
+    otu = taxID
+  ) |>
+  rename(
+    kingdom = Kingdom,
+    phylum = Phylum,
+    class = Class,
+    order = Order,
+    family = Family,
+    genus = Genus
+  ) |>
+  mutate(
+    phylum = case_when(
+      phylum == "Terrabacteria&nbsp;group" ~ "Terrabacteria",
+      TRUE ~ phylum
+    )
+  ) |>
+  mutate(
+    otu = paste0(
+      "otu_",
+      otu
+    )
+  ) |>
+  mutate(
+    across(
+      11:113,
+      ~ replace(
+        .,
+        is.na(.) | . < 50,
+        0
+      )
+    )
+  ) |>
+  filter(
+    if_any(
+      .cols = 11:113,
+      ~ . != 0
+    )
+  )
+
+# Merged data: Find shared and unique columns
+shared_cols <- intersect(
+  names(df_bacteria),
+  names(df_manuscript)
+)
+
+unique_bacteria <- setdiff(
+  names(df_bacteria),
+  shared_cols
+)
+
+unique_manuscript <- setdiff(
+  names(df_manuscript),
+  shared_cols
+)
+
+# Add missing unique columns filled with 0 to each data frame
+df_bacteria_extended <- df_bacteria
+
+df_manuscript_extended <- df_manuscript |>
+  mutate(
+    across(
+      all_of(unique_bacteria),
+      ~ 0
+    )
+  )
+
+# Now merge
+df_project <- bind_rows(
+  df_bacteria_extended,
+  df_manuscript_extended
+) |>
+  mutate(
+    across(
+      11:117,
+      ~ ifelse(
+        is.na(.),
+        0,
+        .
+      )
+    )
+  ) |>
+  mutate(
+    Habitat = case_when(
+      Habitat == "ubiquitous" ~ "Ubiquitous",
+      TRUE ~ Habitat
+    )
+  ) |>
+  drop_na(
+    otu,
+    kingdom
+  ) |>
+  distinct(
+    otu,
+    .keep_all = TRUE
+  )
+
+# Assess the structure of the data
+sh_habita <- df_project |>
+  filter(
+    is.na(Habitat)
+  ) |>
+  select(
+    scientific_name
+  )
+
+write.csv(
+  sh_habita,
+  "data/sh_habitat.csv"
+)
+
+# Import the habitat data
+sf_habitat <- read_csv(
+  "data/manual_habitat.csv"
+) |>
+  select(
+    scientific_name,
+    Habitat
+  ) |>
+  distinct(
+    scientific_name,
+    .keep_all = TRUE
+  )
+
+# First, ensure the data frames have the required columns
+if (!all(
+  c(
+    "scientific_name",
+    "Habitat"
+  ) %in% colnames(df_project)
+)) {
+  stop(
+    "df_project must have columns: scientific_name, Habitat"
+  )
+}
+
+if (!all(
+  c(
+    "scientific_name",
+    "Habitat"
+  ) %in% colnames(sf_habitat)
+)) {
+  stop(
+    "sf_habitat must have columns: scientific_name, Habitat"
+  )
+}
+
+# Perform a left join for the two datasets
+df_project_updated <- df_project |>
+  left_join(
+    sf_habitat |>
+      select(
+        scientific_name,
+        Habitat_sf = Habitat
+      ),
+    by = "scientific_name"
+  ) |>
+  mutate(
+    Habitat = if_else(
+      is.na(Habitat),
+      Habitat_sf,
+      Habitat
+    )
+  ) |>
+  select(
+    -Habitat_sf
+  )
+
+# Update the new data frame
+df_project <- df_project_updated |>
+  distinct(
+    otu,
+    .keep_all = TRUE
+  ) |>
+  drop_na(
+    Habitat
+  )
+
+sf_phylum <- read_csv(
+  "data/phylum.csv"
+) |>
+  select(
+    scientific_name,
+    phylum
+  )
+
+# First, ensure the data frames have the required columns
+if (!all(
+  c(
+    "scientific_name",
+    "phylum"
+  ) %in% colnames(df_project)
+)) {
+  stop(
+    "df_project must have columns: scientific_name, phylum"
+  )
+}
+
+if (!all(
+  c(
+    "scientific_name",
+    "phylum"
+  ) %in% colnames(sf_phylum)
+)) {
+  stop(
+    "sf_phylum must have columns: scientific_name, phylum"
+  )
+}
+
+df_project_phylum <- df_project |>
+  left_join(
+    sf_phylum |>
+      select(
+        scientific_name,
+        phylum_sf = phylum
+      ),
+    by = "scientific_name"
+  ) |>
+  mutate(
+    phylum = if_else(
+      is.na(phylum),
+      phylum_sf,
+      phylum
+    )
+  ) |>
+  select(
+    -phylum_sf
+  )
+
+```
+
+### Habitat classification, taxonomic completion, and data integration
+
+Following processing of the preceding datasets, habitat categories are standardised and missing taxonomic assignments, particularly family-level classifications, are completed using available reference sources. The resulting curated dataset is then converted into phyloseq and microeco data formats for downstream biodiversity and community analyses
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+
+# Prepare project data
+df_project <- df_project_phylum |>
+  distinct(
+    otu,
+    .keep_all = TRUE
+  ) |>
+  mutate(
+    # Reclassify habitat values
+    Habitat = case_when(
+      Habitat %in% c(
+        "Euryhaline",
+        "Parasite"
+      ) ~ "Brackish",
+      TRUE ~ Habitat
+    ),
+    
+    # Fill missing class values
+    class = case_when(
+      is.na(class) &
+        scientific_name == "Amoeboaphelidium protococcarum" ~ "Aphelidea",
+      is.na(class) &
+        scientific_name == "Ancoracysta twista" ~ "Nebulidea",
+      is.na(class) &
+        scientific_name == "Cafileria marina" ~ "Bicosoecida",
+      is.na(class) &
+        scientific_name == "Euplotes vanleeuwenhoeki" ~ "Spirotrichea",
+      is.na(class) &
+        scientific_name == "Cyprinodontiformes" ~ "Teleostei",
+      is.na(class) &
+        scientific_name == "Fundulus dispar" ~ "Teleostei",
+      is.na(class) &
+        scientific_name == "Periophthalmus magnuspinnatus" ~ "Teleostei",
+      is.na(class) &
+        scientific_name == "Priapulus caudatus" ~ "Priapulimorpha",
+      is.na(class) &
+        scientific_name == "Tetraodon biocellatus" ~ "Teleostei",
+      TRUE ~ class
+    ),
+    
+    # Fill missing family values
+    family = case_when(
+      is.na(family) &
+        scientific_name == "Cafileria marina" ~ "Bicosoecidae",
+      is.na(family) &
+        scientific_name == "Cloacina communis" ~ "Chabertiidae",
+      is.na(family) &
+        scientific_name == "Edaphochlamys debaryana" ~ "Chlamydomonadaceae",
+      is.na(family) &
+        scientific_name == "Euplotes vanleeuwenhoeki" ~ "Euplotidae",
+      is.na(family) &
+        scientific_name == "Gonopsimorpha nigrosignata" ~ "Pentatomidae",
+      is.na(family) &
+        scientific_name == "Harringtonia lauricola" ~ "Ophiostomataceae",
+      is.na(family) &
+        scientific_name == "Hyaloraphidium curvatum" ~ "Hyaloraphidiaceae",
+      is.na(family) &
+        scientific_name == "Jaminaea angkorensis" ~ "Chaetomiaceae",
+      is.na(family) &
+        scientific_name == "Limnomonas spitsbergensis" ~ "Chlamydomonadaceae",
+      is.na(family) &
+        scientific_name == "Madagascaria erythrocladioides" ~ "Erythrotrichiaceae",
+      is.na(family) &
+        scientific_name == "Madurella mycetomatis" ~ "Lophiostomataceae",
+      is.na(family) &
+        scientific_name == "Navis striatus" ~ "Muridae",
+      is.na(family) &
+        scientific_name == "Pharyngomonas kirbyi" ~ "Heterolobosea",
+      is.na(family) &
+        scientific_name == "Pseudoerythrocladia kornmannii" ~ "Erythrotrichiaceae",
+      is.na(family) &
+        scientific_name == "Sphenophorus sp. BYU-CO246" ~ "Dryophthoridae",
+      is.na(family) &
+        scientific_name == "Tessaromerus quadriarticulatus" ~ "Urostylidae",
+      is.na(family) &
+        scientific_name == "Trebouxiophyceae sp. MX-AZ01" ~ "Trebouxiophyceae",
+      is.na(family) &
+        scientific_name == "Trichogaster fasciata" ~ "Osphronemidae",
+      is.na(family) &
+        scientific_name == "Trichonotus setiger" ~ "Trichonotidae",
+      is.na(family) &
+        scientific_name == "Vermamoeba vermiformis" ~ "Vermamoebidae",
+      TRUE ~ family
+    )
+  )
+
+
+# Import and prepare sample metadata
+df_metadata <- read.csv(
+  "data/meta.csv"
+) |>
+  janitor::clean_names() |>
+  filter(
+    !str_ends(
+      sample_id,
+      "b"
+    )
+  ) |>
+  mutate(
+    sample_id = make.unique(
+      as.character(sample_id)
+    )
+  ) |>
+  mutate(
+    site = case_when(
+      site == "Mtepeni" ~ "Mtwapa",
+      site == "Mtomondoni" ~ "Mtwapa",
+      site == "Mtwapa Creek" ~ "Mtwapa",
+      site == "Sii Island" ~ "Sii",
+      site == "Kilifi Creek" ~ "Kilifi",
+      site == "Kongo River" ~ "Kongo",
+      TRUE ~ site
+    )
+  ) |>
+  tibble::column_to_rownames(
+    "sample_id"
+  )
+
+
+# Obtain sequencing read data
+df_reads <- df_metadata |>
+  filter(
+    system == "Mangrove"
+  ) |>
+  select(
+    site,
+    number_of_raw_reads,
+    classified_reads,
+    chordate_reads,
+    microbial_reads
+  ) |>
+  rename(
+    Eukaryotes = chordate_reads,
+    Raw_reads = number_of_raw_reads
+  )
+
+
+# Obtain OTU and taxonomic data
+tax_table <- df_project |>
+  select(
+    otu,
+    Habitat,
+    status,
+    kingdom,
+    phylum,
+    class,
+    order,
+    family,
+    genus,
+    scientific_name
+  ) |>
+  tibble::column_to_rownames(
+    "otu"
+  )
+
+
+# Obtain taxa abundance data
+df_abundance <- df_project |>
+  select(
+    otu,
+    Buda_1:VCH_12S
+  ) |>
+  tibble::column_to_rownames(
+    "otu"
+  )
+
+
+# Transform abundance data to data frame
+otu_table <- df_abundance |>
+  as.data.frame()
+
+
+# Prepare taxonomic table
+tax_table <- df_project |>
+  select(
+    otu,
+    status,
+    Habitat,
+    kingdom,
+    phylum,
+    class,
+    order,
+    family,
+    genus,
+    scientific_name
+  ) |>
+  tibble::column_to_rownames(
+    "otu"
+  ) |>
+  as.data.frame()
+
+
+# Create microeco object
+df_microeco <- microtable$new(
+  otu_table = otu_table,
+  tax_table = tax_table,
+  sample_table = df_metadata
+)
+
+
+# Transform OTU and taxonomic tables to matrices
+df_otutax <- as.matrix(
+  tax_table
+)
+
+df_abundance <- as.matrix(
+  df_abundance
+)
+
+
+# Transform to phyloseq data classes
+OTU <- otu_table(
+  df_abundance,
+  taxa_are_rows = TRUE
+)
+
+TAX <- tax_table(
+  df_otutax
+)
+
+sample <- sample_data(
+  df_metadata
+)
+
+
+# Create phyloseq object
+df_phylo <- phyloseq(
+  OTU,
+  TAX,
+  sample
+)
+```
+
+## Explore the microbiome data
+
+The S6 data format prepared for this study is available in the data directory and can be imported directly for downstream microbiome analyses.
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+
+df_micrltr <- readRDS(
+  "data/df_microeco_2.rds"
+)
+
+# Remove OTUs with fewer than 20 contigs
+df_divstat <- clone(
+  df_micrltr
+)
+
+df_divstat$sample_table <- subset(
+  df_divstat$sample_table,
+  system == "Mangrove"
+)
+
+df_divstat$filter_taxa(
+  rel_abund = 0.00000102,
+  freq = 1
+)
+
+df_divstat$tidy_dataset()
+
+
+# Remove unexpected and non-marine taxa
+df_marine <- clone(
+  df_divstat
+)
+
+df_marine$tax_table <- subset(
+  df_marine$tax_table,
+  Habitat != "Terrestrial" &
+    Habitat != "Freshwater" &
+    status == "Expected"
+)
+
+# Clean and remove filtered metadata
+df_marine$tidy_dataset()
+
+
+# Extract OTU data
+otu_data <- df_marine$tax_table
+
+
+# Summarise unique taxonomic counts by kingdom
+df_summary <- otu_data |>
+  group_by(
+    kingdom
+  ) |>
+  summarise(
+    Unique_Phylum = n_distinct(phylum),
+    Unique_Class = n_distinct(class),
+    Unique_Order = n_distinct(order),
+    Unique_Family = n_distinct(family),
+    Unique_Genus = n_distinct(genus),
+    Unique_Species = n_distinct(scientific_name)
+  ) |>
+  ungroup()
+
+
+# Add total row
+df_totals <- df_summary |>
+  summarise(
+    across(
+      where(is.numeric),
+      sum
+    )
+  ) |>
+  mutate(
+    kingdom = "Total"
+  )
+
+
+# Bind totals to summary
+df_final_summary <- bind_rows(
+  df_summary,
+  df_totals
+)
+```
+
+### Explore the checklist status and habitat information
+
+```{r}
+
+tax_data <- df_divstat$tax_table
+
+
+# Habitat information of the identified OTUs
+df_stack <- tax_data |>
+  group_by(
+    phylum
+  ) |>
+  mutate(
+    kingdom = ifelse(
+      is.na(kingdom),
+      first(na.omit(kingdom)),
+      kingdom
+    )
+  ) |>
+  ungroup() |>
+  filter(
+    scientific_name != "Eukaryota sp. BB2"
+  ) |>
+  mutate(
+    kingdom = ifelse(
+      is.na(kingdom),
+      "Chromista",
+      kingdom
+    )
+  ) |>
+  count(
+    Habitat,
+    kingdom,
+    name = "count"
+  )
+
+
+# Colour palette
+okabe_ito7 <- c(
+  "#56B4E9", # sky blue
+  "#009E73", # bluish green
+  "#0072B2", # blue
+  "#D55E00", # vermillion
+  "#CC79A7", # reddish purple
+  "#999999"  # gray
+)
+
+
+# Calculate total per habitat for label
+totals <- df_stack |>
+  group_by(
+    Habitat
+  ) |>
+  summarise(
+    total = sum(count)
+  ) |>
+  ungroup()
+
+
+d1 <- ggplot(
+  df_stack,
+  aes(
+    x = Habitat,
+    y = count,
+    fill = kingdom
+  )
+) +
+  geom_bar(
+    stat = "identity",
+    position = "stack",
+    width = 0.9
+  ) +
+  ylab(
+    "OTU counts"
+  ) +
+  xlab(
+    "Ecosystem"
+  ) +
+  theme_classic() +
+  theme(
+    axis.text.x = element_text(
+      size = 12,
+      angle = 90,
+      face = "bold",
+      hjust = 1
+    ),
+    axis.text.y = element_text(
+      size = 12
+    ),
+    strip.text.y = element_text(
+      size = 12,
+      face = "bold"
+    ),
+    axis.title = element_text(
+      size = 12,
+      face = "bold"
+    )
+  ) +
+  scale_fill_manual(
+    values = okabe_ito7
+  ) +
+  geom_text(
+    data = totals,
+    aes(
+      x = Habitat,
+      y = total,
+      label = total
+    ),
+    vjust = -0.5,
+    fontface = "bold",
+    inherit.aes = FALSE,
+    size = 3
+  )
+
+
+# Species occurrence within the WIO region
+df_occurance <- tax_data |>
+  group_by(
+    phylum
+  ) |>
+  mutate(
+    kingdom = ifelse(
+      is.na(kingdom),
+      first(na.omit(kingdom)),
+      kingdom
+    )
+  ) |>
+  ungroup() |>
+  filter(
+    scientific_name != "Eukaryota sp. BB2"
+  ) |>
+  mutate(
+    kingdom = ifelse(
+      is.na(kingdom),
+      "Chromista",
+      kingdom
+    )
+  ) |>
+  count(
+    status,
+    kingdom,
+    name = "count"
+  )
+
+
+# Calculate total per status for label
+total <- df_occurance |>
+  group_by(
+    status
+  ) |>
+  summarise(
+    total = sum(count)
+  ) |>
+  ungroup()
+
+
+d2 <- ggplot(
+  df_occurance,
+  aes(
+    x = status,
+    y = count,
+    fill = kingdom
+  )
+) +
+  geom_bar(
+    stat = "identity",
+    position = "stack",
+    width = 0.9
+  ) +
+  xlab(
+    "OTU occurance"
+  ) +
+  theme_classic() +
+  scale_fill_manual(
+    values = okabe_ito7
+  ) +
+  geom_text(
+    data = total,
+    aes(
+      x = status,
+      y = total,
+      label = total
+    ),
+    vjust = -0.5,
+    fontface = "bold",
+    inherit.aes = FALSE,
+    size = 3
+  ) +
+  theme(
+    axis.text.x = element_text(
+      size = 12,
+      face = "bold",
+      angle = 90,
+      hjust = 1
+    ),
+    axis.text.y = element_text(
+      size = 12
+    ),
+    strip.text.y = element_text(
+      size = 12,
+      face = "bold"
+    ),
+    axis.title = element_text(
+      size = 12,
+      face = "bold"
+    ),
+    legend.position = "none"
+  ) +
+  ylab("")
+
+
+# Load required library
+pacman::p_load(
+  patchwork
+)
+
+
+# Combine plots
+combined_plot1 <- d1 +
+  d2 +
+  plot_layout(
+    widths = c(
+      0.7,
+      0.3
+    ),
+    guides = "collect"
+  ) &
+  theme(
+    legend.position = "right"
+  )
+
+
+# Add plot annotations
+combined_plot1 <- combined_plot1 +
+  plot_annotation(
+    tag_levels = "a",
+    tag_suffix = ")"
+  ) &
+  theme(
+    plot.tag = element_text(
+      face = "bold",
+      size = 14
+    )
+  )
+
+
+combined_plot1
+```
+
+Identify the number of species matched to the regional register and calculate the mean and standard deviation for each group
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+unmatched <- clone(
+  df_divstat
+)
+
+unmatched$tax_table <- base::subset(
+  unmatched$tax_table,
+  status == "Unexpected"
+)
+
+unmatched$tidy_dataset()
+
+
+# Convert abundance data to presence-absence
+df_mean <- unmatched$otu_table |>
+  mutate(
+    across(
+      where(is.numeric),
+      ~ ifelse(
+        . > 0,
+        1,
+        ifelse(
+          . == 0,
+          0,
+          .
+        )
+      )
+    )
+  )
+
+
+# Sum species occurrences for each sample
+col_sums <- colSums(
+  df_mean
+)
+
+
+# Calculate mean and standard deviation
+mean_col_sum <- mean(
+  col_sums
+)
+
+sd_col_sum <- sd(
+  col_sums
+)
+
+
+# Calculate total number of species occurrences
+total_sum <- sum(
+  df_mean
+)
+
+
+cat(
+  "Column sums:",
+  col_sums,
+  "\n"
+)
+
+cat(
+  "Mean of column sums:",
+  mean_col_sum,
+  "\n"
+)
+
+cat(
+  "Standard deviation of column sums:",
+  sd_col_sum,
+  "\n"
+)
+
+cat(
+  "Total sum:",
+  total_sum,
+  "\n"
+)
+
+
+# Subset the matched clade
+matched <- clone(
+  df_divstat
+)
+
+matched$tax_table <- base::subset(
+  matched$tax_table,
+  status == "Expected"
+)
+
+matched$tidy_dataset()
+
+
+# Convert abundance data to presence-absence
+df_mean2 <- matched$otu_table |>
+  mutate(
+    across(
+      where(is.numeric),
+      ~ ifelse(
+        . > 0,
+        1,
+        ifelse(
+          . == 0,
+          0,
+          .
+        )
+      )
+    )
+  )
+
+
+# Sum species occurrences for each sample
+col_sums1 <- colSums(
+  df_mean2
+)
+
+
+# Calculate mean and standard deviation
+mean_col_sum1 <- mean(
+  col_sums1
+)
+
+sd_col_sum1 <- sd(
+  col_sums1
+)
+
+
+# Calculate total number of species occurrences
+total_sum1 <- sum(
+  df_mean2
+)
+
+
+cat(
+  "Column sums:",
+  col_sums1,
+  "\n"
+)
+
+cat(
+  "Mean of column sums:",
+  mean_col_sum1,
+  "\n"
+)
+
+cat(
+  "Standard deviation of column sums:",
+  sd_col_sum1,
+  "\n"
+)
+
+cat(
+  "Total sum:",
+  total_sum1,
+  "\n"
+)
+```
+
+### Calculate proportions of unexpected taxa by family
+
+```{r}
+df_unexpected <- tax_data |>
+  count(
+    status,
+    family,
+    name = "count"
+  ) |>
+  filter(
+    status == "Unexpected"
+  ) |>
+  group_by(
+    status
+  ) |>
+  mutate(
+    prop = count / sum(count) * 100
+  )
+
+
+# Identify taxa with missing family assignments
+fd_family <- tax_data |>
+  count(
+    status,
+    family,
+    scientific_name,
+    name = "count"
+  ) |>
+  filter(
+    is.na(family)
+  )
+
+
+# Calculate proportions of kingdoms within each habitat
+df_prop <- tax_data |>
+  count(
+    Habitat,
+    kingdom
+  ) |>
+  group_by(
+    Habitat
+  ) |>
+  mutate(
+    prop = n / sum(n)
+  )
+
+
+# Calculate proportions of expected taxa by family
+df_expected <- tax_data |>
+  count(
+    status,
+    family,
+    name = "count"
+  ) |>
+  filter(
+    status == "Expected"
+  ) |>
+  group_by(
+    status
+  ) |>
+  mutate(
+    prop = count / sum(count) * 100
+  )
+
+df_expected
+```
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+df_phylamarine <- clone(
+  df_marine
+)
+
+df_phylamarine$tidy_dataset()
+
+
+# Relative abundance at the phylum level
+p1 <- trans_abund$new(
+  dataset = df_phylamarine,
+  taxrank = "phylum"
+)
+
+p1$plot_bar(
+  others_color = "grey70",
+  facet = "sample_type",
+  xtext_keep = FALSE,
+  legend_text_italic = FALSE
+)
+
+
+# Show 33 taxa at the phylum level
+p1 <- trans_abund$new(
+  dataset = df_phylamarine,
+  taxrank = "phylum",
+  ntaxa = 33
+)
+
+g1 <- p1$plot_heatmap(
+  facet = "sample_type",
+  xtext_keep = FALSE,
+  withmargin = FALSE,
+  plot_breaks = c(
+    0.01,
+    0.1,
+    1,
+    10
+  )
+)
+
+g1 <- g1 +
+  theme(
+    axis.text.y = element_text(
+      face = "italic"
+    )
+  )
+
+g1
+
+
+box1 <- trans_abund$new(
+  dataset = df_phylamarine,
+  taxrank = "phylum",
+  ntaxa = 33
+)
+
+box1$plot_box(
+  xtext_angle = 90
+)
+
+```
+
+## OTU structure and diversity
+
+Subset Eukaryotas from the main data set. The main reason for analysis Microbes and Eukaryotas separately is because, microbes have proportionately high relative abundance, and this sometimes skews the analysis of Eukaryota taxa whose DNA are detected in lower proportion.
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+# Create alpha diversity object
+adlpha_res <- trans_alpha$new(
+  dataset = df_phylamarine  
+)
+
+# Extract the alpha table
+alpha_tabl <- adlpha_res[["data_alpha"]]
+
+alpha_table <- alpha_tabl |>
+  select(Measure, Value, site, sample_type) |>
+  filter(tolower(Measure) %in%
+           c("simpson",
+             "shannon", "chao1"))
+
+alp1 <- ggplot(alpha_table, aes(x = site, y = Value)) +
+  geom_boxplot(fill = "grey70", color = "black") +
+  geom_jitter(width = 0.2, alpha = 0.5, color = "black") +
+  facet_grid(rows = vars(Measure), scales = "free_y") +   # <- vertical facets
+  theme(
+    axis.text.x = element_text(size = 11, angle = 90, hjust = 1),
+    axis.text.y = element_text(size = 11),
+    strip.text.y = element_text(size = 11, face = "bold"),
+    axis.title  = element_text(size = 11, face = "bold"),
+    panel.grid = element_blank()
+  ) +
+  labs(x = "Study site",
+    y = "Alpha diversity value"
+  )
+
+alp1
+
+
+# Test for alpha diversity between sample types
+alpha_sample <- alpha_tabl |>
+  select(Measure, Value, sample_type) |>
+  filter(tolower(Measure) %in%
+           c("simpson",
+             "shannon", "chao1"))
+
+alp2 <- ggplot(alpha_sample, aes(x = sample_type, y = Value)) +
+  geom_boxplot(fill = "grey70", color = "black", width = 0.2) +  
+  geom_jitter(width = 0.15, alpha = 0.5, color = "black") +      
+  facet_grid(rows = vars(Measure), scales = "free_y") +          
+  theme(
+    axis.text.x = element_text(size = 11, angle = 90, hjust = 1),
+    axis.text.y = element_text(size = 11),
+    strip.text.y = element_text(size = 11, face = "bold"),
+    axis.title  = element_text(size = 11, face = "bold"),
+    panel.grid = element_blank()
+  ) +
+  labs(
+    x = "Sample type",
+    y = "Alpha diversity value"
+  )
+
+alp2
+
+combined_plot7 <- alp1 +
+  alp2 +
+  plot_layout(widths = c(0.7, 0.3),
+              guides = "collect") & 
+  theme(legend.position = 'right')
+
+# Add subplot tags A) and B), bold (using prefix/suffix)
+combined_plot7 <- combined_plot7 +
+  plot_annotation(
+    tag_levels = 'a',
+    tag_suffix = ")"
+  ) &
+  theme(plot.tag = element_text(face = "bold", size = 14))
+
+combined_plot7
+
+```
+
+# Statistical test
+
+Test if there is difference in alpha diversity between sites and between sample types
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+alpha_table <- alpha_tabl |>
+  select(Measure, Value, site, sample_type) |>
+  filter(tolower(Measure) %in%
+           c("simpson",
+             "shannon", "chao1"))
+
+source("scripts/alphadivesity_function.R")
+
+source("scripts/post_hoc_test.R")
+
+# Species richness
+history <- taxa |>
+  select(family, species) |>
+  drop_na() |>
+  distinct() |>
+  group_by(family) |>
+  summarise(count = n_distinct(species))
+
+
+
+ednah <- otu_data |>
+  select(family, scientific_name) |>
+  drop_na() |>
+  distinct() |>
+  group_by(family) |>
+  summarise(count = n_distinct(scientific_name))
+
+
+ednahist <- full_join(ednah, history, by = "family",
+                      suffix = c("_eDNA", "_hist"))
+ednahist[is.na(ednahist)] <- 0
+
+# Normality test
+shapiro.test(ednahist$count_eDNA)
+shapiro.test(ednahist$count_hist)
+qqnorm(ednahist$count_eDNA)
+qqnorm(ednahist$count_hist)
+
+# Not normal Non parametric tes
+wilcox.test(ednahist$count_eDNA,
+            ednahist$count_hist,
+            paired = TRUE)
+
+```
+
+# Heatmap, Upset MAp
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+
+df_divstat$cal_betadiv(method = "jaccard")
+
+pc1 <- trans_beta$new(dataset = df_divstat, group = "site", measure = "jaccard")
+  
+pc1$cal_ordination(method = "PCoA")
+# t1$res_ordination is the ordination result list
+class(pc1$res_ordination)
+# plot the PCoA result with confidence ellipse
+pc1$plot_ordination(plot_color = "site", plot_shape = "sample_type", plot_type = c("point", "ellipse"))  
+  
+  
+  library(UpSetR)
+df_upset <- ednahist
+df_upset <- as.data.frame(df_upset)
+
+
+df_upset$eDNA  <- ifelse(df_upset$count_eDNA  > 0, 1, 0)
+df_upset$hist  <- ifelse(df_upset$count_hist  > 0, 1, 0)
+df_upset <- df_upset |>
+  rename("Checklist" = "hist")
+library(UpSetR)
+
+upset1 <- upset(df_upset,
+      sets = c("eDNA", "Checklist"),
+      nintersects = NA,
+      keep.order = TRUE,
+      text.scale = c(2, 2, 2, 2, 2, 2)) 
+upset1
+```
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+library(ggplot2)
+library(ggpubr)
+library(cowplot)
+df_beta <- clone(df_marine)
+df_beta$tidy_dataset()
+
+# Calculate beta diversity
+df_beta <- df_beta$cal_betadiv(measures = "jaccard")
+
+
+df_beta <- trans_beta$
+  new(dataset = df_beta,
+      group = "sample_type",
+      measure = "jaccard")
+
+df_beta$cal_manova(manova_all = TRUE)
+df_beta$res_manova
+
+df_beta$cal_ordination(method = "PCoA")
+# t1$res_ordination is the ordination result list
+class(df_beta$res_ordination)
+
+
+# PCoA plot with points + ellipses, ellipse legend removed
+ber1 <- df_beta$plot_ordination(
+  plot_color = "sample_type",
+  plot_shape = "sample_type",
+  plot_type = c("point", "ellipse")
+) +
+  geom_point(alpha = 1) +
+  geom_vline(xintercept = 0, linetype = "dotted", color = "black", linewidth = 0.6) +
+  geom_hline(yintercept = 0, linetype = "dotted", color = "black", linewidth = 0.6) +
+   theme(
+    axis.text.x = element_text(size = 12, angle = 0, hjust = 1),
+    axis.text.y = element_text(size = 12),
+    strip.text.y = element_text(size = 12, face = "bold"),
+    axis.title  = element_text(size = 12, face = "bold"),
+    panel.grid = element_blank()
+  ) +
+  labs(
+    color = "Sample",
+    shape = "Shape"
+  ) +
+  guides(fill = "none")  
+
+ber2 <- df_beta$plot_ordination(
+  plot_color = "site",
+  plot_shape = "sample_type",
+  plot_type = c("point")
+) +
+  geom_point(alpha = 1) +
+  geom_vline(xintercept = 0, linetype = "dotted", color = "black", linewidth = 0.6) +
+  geom_hline(yintercept = 0, linetype = "dotted", color = "black", linewidth = 0.6) +
+  theme(
+    axis.text.x = element_text(size = 12, angle = 0, hjust = 1),
+    axis.text.y = element_text(size = 12),
+    strip.text.y = element_text(size = 12, face = "bold"),
+    axis.title  = element_text(size = 12, face = "bold"),
+    panel.grid = element_blank()
+  ) +
+  labs(
+    color = "Sample",
+    shape = "Shape"
+  )
+
+
+# Combine plots side by side, collect legends
+combined_plot8 <- ber1 + ber2 +
+  plot_layout(widths = c(0.5, 0.5), guides = "collect") &
+  theme(
+    legend.position = "right",
+    legend.spacing.y = unit(0.2, "cm"),  # vertical spacing
+    legend.spacing.x = unit(0.2, "cm")   # horizontal spacing
+  )
+
+# Add subplot tags A) and B), bold
+combined_plot8 <- combined_plot8 +
+  plot_annotation(
+    tag_levels = 'a',
+    tag_suffix = ")"
+  ) &
+  theme(plot.tag = element_text(face = "bold", size = 12))
+
+combined_plot8
+
+```
+
+# Comapare Historical and Environmental DNA
+
+```{r}
+library(phyloseq)
+library(ggplot2)
+library(vegan)
+library(patchwork)
+
+# Data processing
+df_hist <- taxa |>
+  select(family) |>
+  drop_na() |>
+  distinct()
+
+
+
+eDNA_data <- df_phylamarine$tax_table |>
+  select(family) |>
+   drop_na() |>
+  distinct()
+
+# Extract taxa column as a vector
+deDNA_data <- unique(eDNA_data$family)
+dhist_data <- unique(df_hist$family)
+
+
+# Combine and create a presence-absence matrix----------------------------------
+all_taxa <- unique(c(eDNA_data$family, df_hist$family))
+pa_matrix <- data.frame(
+  Taxon = all_taxa,
+  eDNA = as.integer(all_taxa %in% eDNA_data$family),
+  Historical = as.integer(all_taxa %in% df_hist$family)
+)
+
+#Prepare data for plotting
+plot_data <- pa_matrix |> 
+  mutate(Category = case_when(
+    eDNA == 1 & Historical == 1 ~ "Shared",
+    eDNA == 1 & Historical == 0 ~ "Unique to eDNA",
+    eDNA == 0 & Historical == 1 ~ "Unique to Historical",
+    TRUE ~ "Neither"
+  )) |> 
+  count(Category)
+
+# Add custom labels
+plot_data <- plot_data |> 
+  mutate(Label = case_when(
+    Category == "Shared" ~ 67,
+    Category == "Unique to eDNA" ~ 238,
+    Category == "Unique to Historical" ~ 183,
+    TRUE ~ n  
+  ))
+
+# Taxa unique to each technique
+edna_uniq <- pa_matrix |>
+  filter(eDNA == 1 &
+         Historical == 0)
+
+historycal <- pa_matrix |>
+  filter(Historical == 1 &
+           eDNA == 0)
+
+shared_df <- pa_matrix |>
+  filter(Historical == 1 &
+           eDNA == 1)
+
+# Make the bar plot with labels
+ggplot(plot_data, aes(x = Category, y = n, fill = Category)) +
+  geom_bar(stat = "identity", width = 0.7, color = "grey100") +
+  geom_text(aes(label = Label), vjust = -0.5, size = 4) +  
+  scale_fill_manual(values = c(
+    "Shared" = "#D55E00",
+    "Unique to eDNA" = "#89CFF0",
+    "Unique to Historical" = "grey60",
+    "Neither" = "grey30"
+  )) +
+  theme_classic() +
+  labs(
+    x = "Category",
+    y = "Number of Families"
+  ) +
+  theme(
+    text = element_text(size = 12, face = "bold"),
+    axis.text.x = element_text(size = 12, face = "bold"),
+    legend.position = "none"
+  )
+
+#Process eDNA data--------------------------------------------------------------
+
+library(tidyr)
+library(dplyr)
+
+source("scripts/nmds_alpha.R")
+
+edna_df <- merged_df2 |>
+  select(family, 11:27) |>
+  pivot_longer(
+    cols = -family,             
+    names_to = "site",         
+    values_to = "count"         
+  ) |>
+ distinct()
+
+edna_df$method <- "eDNA"
+
+
+# Historical data
+histo_df <- taxa |>
+  select(site, family, species) |>
+  drop_na() |>
+  distinct() |>
+  group_by(site, family) |>
+  summarise(count = n_distinct(species))
+
+
+
+histo_df$method <- "Historical" 
+
+all_data <- bind_rows(edna_df, histo_df)
+
+# Create unique sample IDs: site + method
+all_data <- all_data |> 
+  mutate(SampleID = paste(site, method, sep = "_"))
+
+comm_matrix <- all_data |> 
+  group_by(SampleID, family) |> 
+  summarise(count = sum(count), .groups = "drop") |> 
+  pivot_wider(
+    names_from = family,
+    values_from = count,
+    values_fill = 0
+  )
+
+# Move SampleID to rownames
+mat <- as.data.frame(comm_matrix)
+rownames(mat) <- mat$SampleID
+mat <- mat[ , -1]
+
+meta <- all_data |> 
+  select(SampleID, site, method) |> 
+  distinct()
+
+
+# Run NMDS on Bray-Curtis distances---------------------------------------------
+library(vegan)
+set.seed(123) 
+nmds <- metaMDS(mat, distance = "jaccard", k = 2, trymax = 100)
+
+# Extract site scores
+nmds_scores <- as.data.frame(scores(nmds, display = "sites"))
+nmds_scores$SampleID <- rownames(nmds_scores)
+
+plot_datax <- nmds_scores |> 
+  left_join(meta, by = "SampleID")
+
+
+# Plot the NMDS with stress value annotation
+ven2 <- ggplot(plot_datax, aes(NMDS1, NMDS2, color = method)) +
+  geom_point(size = 3) +
+  
+  # Add dotted lines through zero
+  geom_vline(xintercept = 0, linetype = "dotted", color = "black", linewidth = 0.6) +
+  geom_hline(yintercept = 0, linetype = "dotted", color = "black", linewidth = 0.6) +
+  
+  labs(color = "Method") +
+  theme(
+    text = element_text(size = 13, face = "bold"),
+    axis.text.x = element_text(size = 13, face = "bold"),
+    legend.position = "right",
+    panel.grid = element_blank()
+  ) +
+  
+  # Add stress label
+  annotate(
+    "text",
+    x = min(plot_datax$NMDS1),
+    y = min(plot_datax$NMDS2),
+    label = "Stress = 0.102",
+    hjust = 0,
+    vjust = -2,
+    size = 5
+  )
+
+ven2
+# Remove legend only from ven (subplot a)
+ven_a <- ven + theme(legend.position = "none")
+
+# Keep legend in ven2
+ven_b <- ven2 + theme(legend.position = "right")
+
+# Combine without guide collection
+combined_plot3 <- ven_b + ven_a +
+  plot_layout(widths = c(0.5, 0.5))
+
+# Add subplot tags A) and B), bold
+combined_plot3 <- combined_plot3 +
+  plot_annotation(
+    tag_levels = 'a',
+    tag_suffix = ")"
+  ) &
+  theme(plot.tag = element_text(face = "bold", size = 12))
+
+
+combined_plot3
+
+library(gridExtra)
+library(grid)
+
+# Convert UpSet plot to grob
+ven_a_grob <- grid.grabExpr(print(ven_a))  # capture UpSet plot as a grob
+ven_b_grob <- ggplotGrob(ven_b)           # convert ggplot to grob
+
+# Arrange side by side
+grid.arrange(ven_b_grob, ven_a_grob, ncol = 2)
+
+```
+
+# ANOVA RESULT
+
+```{r}
+
+comm <- clone(df_divstat)
+
+# assign back the otu_table
+data_new$otu_table <- your_transformed_otu_table
+# go on
+t1 <- trans_beta$new(dataset = data_new, group = "site")
+t1$cal_ordination(ordination = "NMDS", NMDS_matrix = FALSE)
+t1$plot_ordination(loading_arrow = FALSE)
+t1$plot_transect(color = "site")
+
+
+# Perform NMDS
+comm <- beta(comm, 
+             dist.method = "bray", # distance metric
+             ord.method = "nmds")  # NMDS ordination
+
+# Plot NMDS with grouping color
+comm$beta$plot_ord(
+  type = "nmds", 
+  color = "Group",  # column in meta_table for color
+  show.stress = TRUE,
+  ellipse = TRUE,   # optional: draw group ellipses
+  point.size = 3
+)
+
+source("scripts/ANOVA_PERMANOVA.R")
+
+
+# Compute dissimilarity 
+dist_mat <- vegdist(mat, method = "bray")
+
+# Run ANOSIM
+anosim_res <- anosim(dist_mat, grouping = metadata$method, permutations = 999)
+
+# View results
+print(anosim_res)
+
+# Visualize
+plot(anosim_res)
+
+# Contributors of PERMANOVA difference
+pomm_matrix <- all_data |> 
+  group_by(SampleID, family) |> 
+  summarise(count = sum(count), .groups = "drop") |> 
+  pivot_wider(
+    names_from = family,
+    values_from = count,,
+    values_fill = 0
+  )
+
+# Extract site info
+metadata_1 <- pomm_matrix |> 
+  select(SampleID) |> 
+  separate(SampleID, into = c("site", "method"),
+           sep = "_", remove = FALSE) |>
+  filter(method == "eDNA")
+
+# Remove ID and metadata cols to get numeric matrix
+comm_abund_1 <- pomm_matrix |>
+  filter(str_detect(SampleID, "_eDNA$")) |> 
+  select(-SampleID)
+
+comm_abund_1 <- as.data.frame(lapply(comm_abund_1, as.numeric))
+comm_abund_1 <- as.matrix(comm_abund_1)
+
+
+# SIMPER to identify contributing OTUs
+simper_res <- simper(comm_abund_1,
+                     group = metadata_1$site,
+                     permutations = 999)
+
+# View top contributors for each group comparison
+summary(simper_res,
+        ordered = TRUE)
+
+# Suppose simper_res is your simper object
+simper_df <- map_df(names(simper_res), function(contrast) {
+  df <- as.data.frame(simper_res[[contrast]])
+  df$Taxon <- rownames(df)
+  df$Contrast <- contrast
+  df
+})
+
+simper_sig <- simper_df %>%
+  group_by(Contrast) %>%
+  arrange(desc(average), .by_group = TRUE) %>%
+  slice_head(n = 10) %>%   # top 10 per contrast
+  ungroup()
+
+# Reformat the graph and data and draw graph
+contrast_res <- as.data.frame(simper_res$`Ungwana Bay_Vanga`)
+head(contrast_res)
+contrast_res$Taxon <- rownames(contrast_res)
+
+simper_sig <- contrast_res %>%        # keep only significant taxa
+  arrange(desc(average)) %>%   # sort by contribution
+  slice(1:25)                  # top 10
+
+ggplot(simper_sig, aes(x = reorder(Taxon, average), y = average)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(x = "Taxon", y = "Average contribution") +
+  theme_alluvial()
+
+```
+
+```{r}
+library(phylosmith)
+
+nmds_phyloseq(df_phylo, c("site"), circle = TRUE, verbose = FALSE)
+```
+
+# END

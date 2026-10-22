@@ -1,0 +1,85 @@
+---
+title: "eDNA_biodiversity_analysis"
+author: "Oketch Fredrick"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Environmental DNA Analysis
+
+These are the scripts for the analys of the eDNA result the raw results were processed into the microeco (S6) class data frame using the script shared in the line xxxx
+
+```{r cars}
+pacman::p_load(
+  microeco,
+  phyloseq
+)
+
+df_micrltr <- readRDS("data/df_microeco_2.rds")
+
+# Remove OTUs with fewer than 20 contigs
+df_divstat <- clone(df_microeco)
+
+df_divstat$sample_table <- subset(
+  df_divstat$sample_table,
+  system == "Mangrove"
+)
+
+df_divstat$filter_taxa(
+  rel_abund = 0.00000102,
+  freq = 1
+)
+df_divstat$tidy_dataset()
+
+# Remove "Unexpected" and none marine taxa
+df_marine <- clone(df_divstat)
+
+df_marine$tax_table <- subset(df_marine$tax_table,
+                                Habitat != "Terrestrial" &
+                                  Habitat != "Freshwater" &
+                                status == "Expected")
+
+# Clean and remove the filtered metadata
+df_marine$tidy_dataset()
+
+otu_data <- df_marine$tax_table
+
+# Load library
+library(dplyr)
+library(gt)
+
+# Summaries unique counts per kingdom
+df_summary <- otu_data |> 
+  group_by(kingdom) |> 
+  summarise(
+    Unique_Phylum  = n_distinct(phylum),
+    Unique_Class   = n_distinct(class),
+    Unique_Order   = n_distinct(order),
+    Unique_Family  = n_distinct(family),
+    Unique_Genus   = n_distinct(genus),
+    Unique_Species = n_distinct(scientific_name)
+  ) |> 
+  ungroup()
+
+# Add total row
+df_totals <- df_summary |> 
+  summarise(across(where(is.numeric), sum)) |> 
+  mutate(kingdom = "Total")
+
+# Bind totals to summary
+df_final_summary <- bind_rows(df_summary, df_totals)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
